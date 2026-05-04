@@ -445,7 +445,7 @@ function mountPanel() {
             </div>
         </div>
     `;
-    document.body.appendChild(wrapper);
+    (document.documentElement || document.body).appendChild(wrapper);
 
     ui.launcher = document.getElementById('idic-companion-launcher');
     ui.launcherText = document.getElementById('idic-companion-launcher-text');
@@ -471,8 +471,8 @@ function mountPanel() {
     ui.closeSyncSheetButton = document.getElementById('idic-companion-close-sync-sheet');
 
     applyFloatingLayout();
-    if (ui.panel) ui.panel.style.display = 'none';
-    if (ui.launcher) ui.launcher.style.display = 'flex';
+    if (ui.panel) setImportantStyles(ui.panel, { display: 'none', visibility: 'hidden', opacity: '0' });
+    if (ui.launcher) setImportantStyles(ui.launcher, { display: 'flex', visibility: 'visible', opacity: '1' });
 
     ui.launcher?.addEventListener('click', () => setPanelOpen(!runtime.panelOpen));
     ui.closeButton?.addEventListener('click', () => setPanelOpen(false));
@@ -537,12 +537,24 @@ function setPanelOpen(open) {
     runtime.panelOpen = Boolean(open);
     applyFloatingLayout();
     if (ui.panel) {
-        ui.panel.classList.toggle('hidden', !runtime.panelOpen);
-        ui.panel.style.display = runtime.panelOpen ? 'flex' : 'none';
+        ui.panel.classList.toggle('hidden', false);
+        setImportantStyles(ui.panel, {
+            display: runtime.panelOpen ? 'flex' : 'none',
+            opacity: runtime.panelOpen ? '1' : '0',
+            visibility: runtime.panelOpen ? 'visible' : 'hidden',
+            pointerEvents: runtime.panelOpen ? 'auto' : 'none',
+            transform: 'none',
+        });
     }
     if (ui.launcher) {
-        ui.launcher.classList.toggle('hidden', runtime.panelOpen);
-        ui.launcher.style.display = runtime.panelOpen ? 'none' : 'flex';
+        ui.launcher.classList.toggle('hidden', false);
+        setImportantStyles(ui.launcher, {
+            display: runtime.panelOpen ? 'none' : 'flex',
+            opacity: runtime.panelOpen ? '0' : '1',
+            visibility: runtime.panelOpen ? 'hidden' : 'visible',
+            pointerEvents: runtime.panelOpen ? 'none' : 'auto',
+            transform: 'none',
+        });
     }
     if (!runtime.panelOpen) {
         setSyncSheetOpen(false);
@@ -570,17 +582,21 @@ function applyFloatingLayout() {
     const isMobile = window.matchMedia ? window.matchMedia('(max-width: 900px)').matches : window.innerWidth <= 900;
 
     if (root) {
-        Object.assign(root.style, {
+        setImportantStyles(root, {
             position: 'fixed',
             inset: '0',
-            zIndex: '49999',
+            zIndex: '2147483644',
             pointerEvents: 'none',
             overflow: 'visible',
+            display: 'block',
+            opacity: '1',
+            visibility: 'visible',
+            transform: 'none',
         });
     }
 
     if (ui.launcher) {
-        Object.assign(ui.launcher.style, {
+        setImportantStyles(ui.launcher, {
             position: 'fixed',
             right: isMobile ? '10px' : '12px',
             bottom: isMobile ? '78px' : '86px',
@@ -588,18 +604,21 @@ function applyFloatingLayout() {
             height: isMobile ? '50px' : '52px',
             display: runtime.panelOpen ? 'none' : 'flex',
             pointerEvents: 'auto',
-            zIndex: '50001',
+            zIndex: '2147483647',
+            opacity: runtime.panelOpen ? '0' : '1',
+            visibility: runtime.panelOpen ? 'hidden' : 'visible',
+            transform: 'none',
         });
     }
 
     if (ui.panel) {
-        Object.assign(ui.panel.style, isMobile
+        setImportantStyles(ui.panel, isMobile
             ? {
                 position: 'fixed',
                 left: '8px',
                 right: '8px',
-                top: '88px',
-                bottom: '8px',
+                top: '76px',
+                bottom: '10px',
                 width: 'auto',
                 height: 'auto',
             }
@@ -613,10 +632,33 @@ function applyFloatingLayout() {
                 height: 'min(70vh, 720px)',
                 maxWidth: 'calc(100vw - 24px)',
             });
-        ui.panel.style.pointerEvents = 'auto';
-        ui.panel.style.zIndex = '50000';
-        ui.panel.style.display = runtime.panelOpen ? 'flex' : 'none';
+        setImportantStyles(ui.panel, {
+            zIndex: '2147483646',
+            display: runtime.panelOpen ? 'flex' : 'none',
+            flexDirection: 'column',
+            opacity: runtime.panelOpen ? '1' : '0',
+            visibility: runtime.panelOpen ? 'visible' : 'hidden',
+            pointerEvents: runtime.panelOpen ? 'auto' : 'none',
+            transform: 'none',
+            overflow: 'hidden',
+            boxSizing: 'border-box',
+            background: '#eef2f7',
+            color: '#1f2937',
+            border: '1px solid rgba(85, 102, 140, 0.22)',
+            boxShadow: '0 18px 50px rgba(15, 23, 42, 0.32)',
+        });
     }
+}
+
+function setImportantStyles(element, styles) {
+    if (!element || !styles) return;
+    Object.entries(styles).forEach(([key, value]) => {
+        element.style.setProperty(toKebabCase(key), String(value), 'important');
+    });
+}
+
+function toKebabCase(value) {
+    return String(value).replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`);
 }
 
 function getBadgeText(name) {
