@@ -1,5 +1,6 @@
 const MODULE_NAME = 'idic_companion';
 const STATE_STORAGE_PREFIX = 'idic-companion-state:';
+const FLOATING_POSITION_STORAGE_KEY = 'idic-companion-floating-position:v1';
 const DEFAULT_STATUS_SELECTORS = [
     '.mes_status',
     '.mes-status',
@@ -48,6 +49,8 @@ const runtime = {
     lastSyncStamp: '',
     roleOptions: [],
     roleFetchInFlight: false,
+    floatingPosition: loadFloatingPosition(),
+    dragState: null,
 };
 
 const ui = {};
@@ -402,7 +405,7 @@ function mountPanel() {
             <span id="idic-companion-launcher-text" class="idic-companion__launcher-text">陪</span>
         </button>
         <div id="idic-companion-panel" class="hidden">
-            <div class="idic-companion__header">
+            <div id="idic-companion-header" class="idic-companion__header">
                 <div id="idic-companion-avatar" class="idic-companion__avatar">陪</div>
                 <div class="idic-companion__title">
                     <strong id="idic-companion-chat-title">陪读</strong>
@@ -466,6 +469,7 @@ function mountPanel() {
     ui.launcherText = getPanelElement('idic-companion-launcher-text');
     ui.panel = getPanelElement('idic-companion-panel');
     ui.avatar = getPanelElement('idic-companion-avatar');
+    ui.header = getPanelElement('idic-companion-header');
     ui.chatTitle = getPanelElement('idic-companion-chat-title');
     ui.subtitle = getPanelElement('idic-companion-subtitle');
     ui.footerStatus = getPanelElement('idic-companion-footer-status');
@@ -489,8 +493,9 @@ function mountPanel() {
     if (ui.panel) setImportantStyles(ui.panel, { display: 'none', visibility: 'hidden', opacity: '0' });
     if (ui.launcher) setImportantStyles(ui.launcher, { display: 'flex', visibility: 'visible', opacity: '1' });
 
-    ui.launcher?.addEventListener('click', () => setPanelOpen(!runtime.panelOpen));
+    bindFloatingDrag();
     ui.closeButton?.addEventListener('click', () => setPanelOpen(false));
+    ui.closeButton?.addEventListener('pointerdown', (event) => event.stopPropagation());
     ui.refreshRolesButton?.addEventListener('click', () => {
         void fetchRoleOptions({ force: true, announce: true });
     });
@@ -557,6 +562,7 @@ function getCompanionPanelCss() {
             font-size: 18px;
             font-weight: 700;
             line-height: 1;
+            touch-action: none;
         }
         #idic-companion-launcher.active::after {
             content: "";
@@ -600,6 +606,8 @@ function getCompanionPanelCss() {
             padding: 10px 12px 8px;
             background: linear-gradient(180deg, #dcecff 0%, #f7fbff 100%);
             border-bottom: 1px solid rgba(85, 102, 140, 0.12);
+            cursor: move;
+            touch-action: none;
         }
         .idic-companion__avatar {
             width: 34px;
@@ -964,6 +972,64 @@ function bindContextEvents() {
     if (events.MESSAGE_SWIPED) source.on(events.MESSAGE_SWIPED, () => void resync({ captureLatestStatus: false, forceLatestRescan: false }));
 }
 
+function bindFloatingDrag() {
+    bindDragHandle(ui.launcher, 'launcher', () => setPanelOpen(true));
+    bindDragHandle(ui.header, 'panel', null);
+}
+
+function bindDragHandle(handle, targetName, clickHandler) {
+    if (!handle) return;
+    handle.addEventListener('pointerdown', (event) => {
+        if (event.button != null && event.button !== 0) return;
+        if (targetName === 'panel' && event.target?.closest?.('button, select, input, textarea')) return;
+        const target = targetName === 'launcher' ? ui.launcher : ui.panel;
+        if (!target) return;
+        const rect = target.getBoundingClientRect();
+        runtime.dragState = {
+            targetName,
+            pointerId: event.pointerId,
+            startClientX: event.clientX,
+            startClientY: event.clientY,
+            startX: rect.left,
+            startY: rect.top,
+            width: rect.width,
+            height: rect.height,
+            moved: false,
+        };
+        try {
+            handle.setPointerCapture?.(event.pointerId);
+        } catch (_) {
+            // Some mobile WebViews do not support pointer capture inside shadow DOM.
+        }
+        event.preventDefault();
+    });
+
+    handle.addEventListener('pointermove', (event) => {
+        const state = runtime.dragState;
+        if (!state || state.targetName !== targetName || state.pointerId !== event.pointerId) return;
+        const dx = event.clientX - state.startClientX;
+        const dy = event.clientY - state.startClientY;
+        if (Math.abs(dx) + Math.abs(dy) > 6) state.moved = true;
+        const point = clampFloatingPoint({
+            x: state.startX + dx,
+            y: state.startY + dy,
+        }, state.width, state.height);
+        runtime.floatingPosition[targetName] = point;
+        applyFloatingLayout();
+        event.preventDefault();
+    });
+
+    const finish = (event) => {
+        const state = runtime.dragState;
+        if (!state || state.targetName !== targetName || state.pointerId !== event.pointerId) return;
+        runtime.dragState = null;
+        saveFloatingPosition();
+        if (!state.moved && typeof clickHandler === 'function') clickHandler();
+    };
+    handle.addEventListener('pointerup', finish);
+    handle.addEventListener('pointercancel', finish);
+}
+
 function setPanelOpen(open) {
     runtime.panelOpen = Boolean(open);
     applyFloatingLayout();
@@ -1011,6 +1077,18 @@ function getSelectedRoleOption() {
 function applyFloatingLayout() {
     const root = ui.rootHost || document.getElementById('idic-companion-root');
     const isMobile = window.matchMedia ? window.matchMedia('(max-width: 900px)').matches : window.innerWidth <= 900;
+    const viewport = getViewportSize();
+    const launcherSize = isMobile ? 50 : 52;
+    const launcherDefault = {
+        x: viewport.width - launcherSize - (isMobile ? 10 : 12),
+        y: viewport.height - launcherSize - (isMobile ? 78 : 86),
+    };
+    const launcherPoint = clampFloatingPoint(runtime.floatingPosition.launcher || launcherDefault, launcherSize, launcherSize);
+    const panelSize = getPanelSize(isMobile, viewport);
+    const panelDefault = isMobile
+        ? { x: 8, y: 76 }
+        : { x: viewport.width - panelSize.width - 12, y: viewport.height - panelSize.height - 12 };
+    const panelPoint = clampFloatingPoint(runtime.floatingPosition.panel || panelDefault, panelSize.width, panelSize.height);
 
     if (root) {
         setImportantStyles(root, {
@@ -1029,10 +1107,12 @@ function applyFloatingLayout() {
     if (ui.launcher) {
         setImportantStyles(ui.launcher, {
             position: 'fixed',
-            right: isMobile ? '10px' : '12px',
-            bottom: isMobile ? '78px' : '86px',
-            width: isMobile ? '50px' : '52px',
-            height: isMobile ? '50px' : '52px',
+            left: `${launcherPoint.x}px`,
+            top: `${launcherPoint.y}px`,
+            right: 'auto',
+            bottom: 'auto',
+            width: `${launcherSize}px`,
+            height: `${launcherSize}px`,
             display: runtime.panelOpen ? 'none' : 'flex',
             pointerEvents: 'auto',
             zIndex: '2147483647',
@@ -1043,27 +1123,16 @@ function applyFloatingLayout() {
     }
 
     if (ui.panel) {
-        setImportantStyles(ui.panel, isMobile
-            ? {
-                position: 'fixed',
-                left: '8px',
-                right: '8px',
-                top: '76px',
-                bottom: '10px',
-                width: 'auto',
-                height: 'auto',
-            }
-            : {
-                position: 'fixed',
-                left: 'auto',
-                right: '12px',
-                top: 'auto',
-                bottom: '12px',
-                width: '388px',
-                height: 'min(70vh, 720px)',
-                maxWidth: 'calc(100vw - 24px)',
-            });
         setImportantStyles(ui.panel, {
+            position: 'fixed',
+            left: `${panelPoint.x}px`,
+            top: `${panelPoint.y}px`,
+            right: 'auto',
+            bottom: 'auto',
+            width: `${panelSize.width}px`,
+            height: `${panelSize.height}px`,
+            minHeight: '320px',
+            maxWidth: 'none',
             zIndex: '2147483646',
             display: runtime.panelOpen ? 'flex' : 'none',
             flexDirection: 'column',
@@ -1078,6 +1147,55 @@ function applyFloatingLayout() {
             border: '1px solid rgba(85, 102, 140, 0.22)',
             boxShadow: '0 18px 50px rgba(15, 23, 42, 0.32)',
         });
+    }
+}
+
+function getViewportSize() {
+    return {
+        width: Math.max(320, window.innerWidth || document.documentElement?.clientWidth || 320),
+        height: Math.max(420, window.innerHeight || document.documentElement?.clientHeight || 420),
+    };
+}
+
+function getPanelSize(isMobile, viewport = getViewportSize()) {
+    if (isMobile) {
+        return {
+            width: Math.max(300, viewport.width - 16),
+            height: Math.max(320, Math.min(viewport.height - 86, Math.round(viewport.height * 0.58))),
+        };
+    }
+    return {
+        width: Math.min(388, viewport.width - 24),
+        height: Math.max(360, Math.min(720, Math.round(viewport.height * 0.7))),
+    };
+}
+
+function clampFloatingPoint(point, width, height) {
+    const viewport = getViewportSize();
+    const safeWidth = Math.max(40, Number(width) || 40);
+    const safeHeight = Math.max(40, Number(height) || 40);
+    const maxX = Math.max(4, viewport.width - safeWidth - 4);
+    const maxY = Math.max(4, viewport.height - safeHeight - 4);
+    return {
+        x: clampNumber(point?.x, 4, maxX, 4),
+        y: clampNumber(point?.y, 4, maxY, 76),
+    };
+}
+
+function loadFloatingPosition() {
+    try {
+        const parsed = tryParseJson(localStorage.getItem(FLOATING_POSITION_STORAGE_KEY) || '');
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (_) {
+        return {};
+    }
+}
+
+function saveFloatingPosition() {
+    try {
+        localStorage.setItem(FLOATING_POSITION_STORAGE_KEY, JSON.stringify(runtime.floatingPosition || {}));
+    } catch (_) {
+        // Local storage can be unavailable in some embedded browsers.
     }
 }
 
@@ -2178,9 +2296,10 @@ async function callBridge(action, payload) {
     if (settings.bridgeToken) {
         headers['x-idic-bridge-token'] = settings.bridgeToken;
     }
-    if (settings.bridgeAuthKey) {
-        headers.authorization = `Bearer ${settings.bridgeAuthKey}`;
-        headers.apikey = settings.bridgeAuthKey;
+    const bridgeAuthKey = getBridgeAuthKey(settings);
+    if (bridgeAuthKey) {
+        headers.Authorization = `Bearer ${bridgeAuthKey}`;
+        headers.apikey = bridgeAuthKey;
     }
 
     const response = await fetch(bridgeUrl, {
@@ -2192,12 +2311,33 @@ async function callBridge(action, payload) {
     const raw = await response.text();
     const parsed = tryParseJson(raw);
     if (!response.ok) {
-        const message = parsed && typeof parsed.error === 'string'
-            ? parsed.error
-            : (raw || `HTTP ${response.status}`);
+        const message = getBridgeErrorMessage(parsed, raw, response.status);
         throw new Error(message);
     }
     return parsed && typeof parsed === 'object' ? parsed : {};
+}
+
+function getBridgeAuthKey(settings) {
+    const explicit = toTrimmedString(settings.bridgeAuthKey);
+    if (explicit) return explicit;
+    const token = toTrimmedString(settings.bridgeToken);
+    return looksLikeJwt(token) ? token : '';
+}
+
+function looksLikeJwt(value) {
+    return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(toTrimmedString(value));
+}
+
+function getBridgeErrorMessage(parsed, raw, status) {
+    const code = toTrimmedString(parsed?.code || parsed?.error_code);
+    const error = toTrimmedString(parsed?.error || parsed?.message || raw);
+    if (code === 'UNAUTHORIZED_NO_AUTH_HEADER' || /NO_AUTH_HEADER/i.test(error)) {
+        return '函数缺少授权：请在设置里的「函数密钥」填 Supabase anon key';
+    }
+    if (/JWT|invalid token|unauthorized/i.test(error)) {
+        return '函数密钥不对：请检查 Supabase anon key';
+    }
+    return error || `HTTP ${status}`;
 }
 
 function pushTranscriptEntry(entry) {
