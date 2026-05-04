@@ -388,9 +388,16 @@ async function mountSettings() {
 }
 
 function mountPanel() {
-    const wrapper = document.createElement('div');
-    wrapper.id = 'idic-companion-root';
-    wrapper.innerHTML = `
+    document.querySelectorAll('#idic-companion-root').forEach((node) => node.remove());
+
+    const host = document.createElement('div');
+    host.id = 'idic-companion-root';
+    const root = typeof host.attachShadow === 'function'
+        ? host.attachShadow({ mode: 'open' })
+        : host;
+
+    root.innerHTML = `
+        <style>${getCompanionPanelCss()}</style>
         <button id="idic-companion-launcher" type="button" aria-label="打开陪读窗">
             <span id="idic-companion-launcher-text" class="idic-companion__launcher-text">陪</span>
         </button>
@@ -445,30 +452,38 @@ function mountPanel() {
             </div>
         </div>
     `;
-    (document.documentElement || document.body).appendChild(wrapper);
+    document.body.appendChild(host);
 
-    ui.launcher = document.getElementById('idic-companion-launcher');
-    ui.launcherText = document.getElementById('idic-companion-launcher-text');
-    ui.panel = document.getElementById('idic-companion-panel');
-    ui.avatar = document.getElementById('idic-companion-avatar');
-    ui.chatTitle = document.getElementById('idic-companion-chat-title');
-    ui.subtitle = document.getElementById('idic-companion-subtitle');
-    ui.footerStatus = document.getElementById('idic-companion-footer-status');
-    ui.closeButton = document.getElementById('idic-companion-close');
-    ui.contextChips = document.getElementById('idic-companion-context-chips');
-    ui.modulesRoot = document.getElementById('idic-companion-modules');
-    ui.scrollRoot = document.getElementById('idic-companion-scroll');
-    ui.transcriptRoot = document.getElementById('idic-companion-transcript');
-    ui.input = document.getElementById('idic-companion-input');
-    ui.sendButton = document.getElementById('idic-companion-send');
-    ui.refreshRolesButton = document.getElementById('idic-companion-refresh-roles');
-    ui.roleSelect = document.getElementById('idic-companion-role-select');
-    ui.regenerateButton = document.getElementById('idic-companion-regenerate');
-    ui.continueButton = document.getElementById('idic-companion-continue');
-    ui.openSyncSheetButton = document.getElementById('idic-companion-open-sync-sheet');
-    ui.syncSheet = document.getElementById('idic-companion-sync-sheet');
-    ui.syncSheetMask = document.getElementById('idic-companion-sync-sheet-mask');
-    ui.closeSyncSheetButton = document.getElementById('idic-companion-close-sync-sheet');
+    const getPanelElement = (id) => (
+        typeof root.getElementById === 'function'
+            ? root.getElementById(id)
+            : root.querySelector(`#${id}`)
+    );
+
+    ui.rootHost = host;
+    ui.rootNode = root;
+    ui.launcher = getPanelElement('idic-companion-launcher');
+    ui.launcherText = getPanelElement('idic-companion-launcher-text');
+    ui.panel = getPanelElement('idic-companion-panel');
+    ui.avatar = getPanelElement('idic-companion-avatar');
+    ui.chatTitle = getPanelElement('idic-companion-chat-title');
+    ui.subtitle = getPanelElement('idic-companion-subtitle');
+    ui.footerStatus = getPanelElement('idic-companion-footer-status');
+    ui.closeButton = getPanelElement('idic-companion-close');
+    ui.contextChips = getPanelElement('idic-companion-context-chips');
+    ui.modulesRoot = getPanelElement('idic-companion-modules');
+    ui.scrollRoot = getPanelElement('idic-companion-scroll');
+    ui.transcriptRoot = getPanelElement('idic-companion-transcript');
+    ui.input = getPanelElement('idic-companion-input');
+    ui.sendButton = getPanelElement('idic-companion-send');
+    ui.refreshRolesButton = getPanelElement('idic-companion-refresh-roles');
+    ui.roleSelect = getPanelElement('idic-companion-role-select');
+    ui.regenerateButton = getPanelElement('idic-companion-regenerate');
+    ui.continueButton = getPanelElement('idic-companion-continue');
+    ui.openSyncSheetButton = getPanelElement('idic-companion-open-sync-sheet');
+    ui.syncSheet = getPanelElement('idic-companion-sync-sheet');
+    ui.syncSheetMask = getPanelElement('idic-companion-sync-sheet-mask');
+    ui.closeSyncSheetButton = getPanelElement('idic-companion-close-sync-sheet');
 
     applyFloatingLayout();
     if (ui.panel) setImportantStyles(ui.panel, { display: 'none', visibility: 'hidden', opacity: '0' });
@@ -505,6 +520,422 @@ function mountPanel() {
         }
     });
     window.addEventListener('resize', applyFloatingLayout);
+}
+
+function getCompanionPanelCss() {
+    return `
+        :host {
+            all: initial;
+            position: fixed !important;
+            inset: 0 !important;
+            z-index: 2147483644 !important;
+            pointer-events: none !important;
+            overflow: visible !important;
+        }
+        *, *::before, *::after {
+            box-sizing: border-box;
+            letter-spacing: 0;
+            font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+        #idic-companion-launcher {
+            position: fixed;
+            right: 10px;
+            bottom: 78px;
+            z-index: 2147483647;
+            width: 52px;
+            height: 52px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 0;
+            border-radius: 999px;
+            background: #2f7ff2;
+            color: #fff;
+            box-shadow: 0 10px 26px rgba(47, 127, 242, 0.38);
+            pointer-events: auto;
+            cursor: pointer;
+            font-size: 18px;
+            font-weight: 700;
+            line-height: 1;
+        }
+        #idic-companion-launcher.active::after {
+            content: "";
+            position: absolute;
+            top: 6px;
+            right: 6px;
+            width: 10px;
+            height: 10px;
+            border-radius: 999px;
+            background: #22c55e;
+            border: 2px solid #fff;
+        }
+        #idic-companion-panel {
+            position: fixed;
+            left: 8px;
+            right: 8px;
+            top: 76px;
+            bottom: 10px;
+            z-index: 2147483646;
+            min-height: 320px;
+            display: none;
+            flex-direction: column;
+            overflow: hidden;
+            border-radius: 18px;
+            background: #eef2f7;
+            color: #1f2937;
+            border: 1px solid rgba(85, 102, 140, 0.22);
+            box-shadow: 0 18px 50px rgba(15, 23, 42, 0.32);
+            pointer-events: auto;
+            transform: none;
+        }
+        .hidden {
+            display: none !important;
+        }
+        .idic-companion__header {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-height: 56px;
+            padding: 10px 12px 8px;
+            background: linear-gradient(180deg, #dcecff 0%, #f7fbff 100%);
+            border-bottom: 1px solid rgba(85, 102, 140, 0.12);
+        }
+        .idic-companion__avatar {
+            width: 34px;
+            height: 34px;
+            flex: 0 0 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            background: #2f7ff2;
+            color: #fff;
+            font-size: 15px;
+            font-weight: 700;
+        }
+        .idic-companion__title {
+            min-width: 0;
+            flex: 1 1 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .idic-companion__title strong {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #111827;
+            font-size: 16px;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+        .idic-companion__subtitle {
+            color: #6b7280;
+            font-size: 11px;
+            line-height: 1.2;
+        }
+        .idic-companion__icon-btn,
+        .idic-companion__mini-btn,
+        .idic-companion__send-btn {
+            border: 0;
+            cursor: pointer;
+            font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+        .idic-companion__icon-btn {
+            width: 32px;
+            height: 32px;
+            flex: 0 0 32px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.86);
+            color: #2f5ea8;
+            font-size: 18px;
+            line-height: 1;
+        }
+        .idic-companion__rolebar {
+            flex: 0 0 auto;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto auto;
+            gap: 6px;
+            align-items: center;
+            padding: 8px 10px 10px;
+            background: #fff;
+            border-bottom: 1px solid rgba(85, 102, 140, 0.08);
+        }
+        .idic-companion__rolebar select {
+            min-width: 0;
+            width: 100%;
+            height: 38px;
+            border-radius: 14px;
+            border: 1px solid rgba(99, 115, 145, 0.18);
+            background: #f7f8fc;
+            color: #111827;
+            padding: 0 10px;
+            font-size: 14px;
+        }
+        .idic-companion__mini-btn {
+            min-width: 0;
+            height: 38px;
+            padding: 0 10px;
+            border-radius: 14px;
+            background: #edf3ff;
+            color: #355da7;
+            font-size: 13px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .idic-companion__mini-btn.accent {
+            background: #dfeeff;
+            color: #2064d5;
+        }
+        .idic-companion__mini-btn:disabled,
+        .idic-companion__send-btn:disabled,
+        .idic-companion__icon-btn:disabled {
+            opacity: 0.48;
+            cursor: not-allowed;
+        }
+        .idic-companion__body {
+            position: relative;
+            flex: 1 1 auto;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        .idic-companion__scroll {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 10px 8px 6px;
+            background: linear-gradient(180deg, #ecf3ff 0%, #f4f7fc 24%, #eef2f7 100%);
+        }
+        .idic-companion__transcript {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .idic-companion__bubble {
+            max-width: 90%;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .idic-companion__bubble.user {
+            align-self: flex-end;
+            align-items: flex-end;
+        }
+        .idic-companion__bubble.assistant {
+            align-self: flex-start;
+            align-items: flex-start;
+        }
+        .idic-companion__bubble.system {
+            max-width: 100%;
+            align-self: center;
+            align-items: center;
+        }
+        .idic-companion__bubble-box {
+            padding: 10px 12px;
+            border-radius: 16px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.55;
+            font-size: 14px;
+            box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
+        }
+        .idic-companion__bubble.user .idic-companion__bubble-box {
+            background: #b9eb7d;
+            color: #1f2937;
+            border-bottom-right-radius: 6px;
+        }
+        .idic-companion__bubble.assistant .idic-companion__bubble-box {
+            background: #fff;
+            color: #111827;
+            border-bottom-left-radius: 6px;
+        }
+        .idic-companion__bubble.system .idic-companion__bubble-box {
+            background: rgba(65, 94, 148, 0.08);
+            color: #4b5563;
+            font-size: 12px;
+            border-radius: 999px;
+            box-shadow: none;
+        }
+        .idic-companion__bubble-meta {
+            color: #8a94a7;
+            font-size: 10px;
+            padding: 0 4px;
+        }
+        .idic-companion__composer {
+            flex: 0 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 8px 8px calc(10px + env(safe-area-inset-bottom));
+            background: #fff;
+            border-top: 1px solid rgba(85, 102, 140, 0.08);
+        }
+        .idic-companion__quick-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .idic-companion__quick-actions .idic-companion__status {
+            min-width: 0;
+            margin-left: auto;
+            overflow: hidden;
+            text-align: right;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #7a8396;
+            font-size: 12px;
+        }
+        .idic-companion__composer-row {
+            display: flex;
+            align-items: flex-end;
+            gap: 8px;
+        }
+        .idic-companion__composer textarea {
+            flex: 1 1 auto;
+            min-height: 42px;
+            max-height: 110px;
+            resize: none;
+            border: 1px solid rgba(99, 115, 145, 0.14);
+            border-radius: 18px;
+            background: #f5f7fc;
+            color: #111827;
+            padding: 10px 12px;
+            font-size: 16px;
+            line-height: 1.45;
+        }
+        .idic-companion__send-btn {
+            flex: 0 0 auto;
+            min-width: 60px;
+            height: 42px;
+            padding: 0 14px;
+            border-radius: 18px;
+            background: #2f7ff2;
+            color: #fff;
+            font-size: 15px;
+            font-weight: 700;
+        }
+        .idic-companion__empty {
+            padding: 24px 14px;
+            text-align: center;
+            color: #8a94a7;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .idic-companion__sheet {
+            position: absolute;
+            inset: 0;
+            z-index: 3;
+        }
+        .idic-companion__sheet-mask {
+            position: absolute;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.28);
+        }
+        .idic-companion__sheet-card {
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            max-height: 76%;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 12px 12px calc(14px + env(safe-area-inset-bottom));
+            border-radius: 18px 18px 0 0;
+            background: #fff;
+            box-shadow: 0 -8px 28px rgba(15, 23, 42, 0.14);
+        }
+        .idic-companion__sheet-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .idic-companion__sheet-header strong {
+            color: #111827;
+            font-size: 16px;
+        }
+        .idic-companion__chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .idic-companion__chip {
+            display: inline-flex;
+            align-items: center;
+            min-height: 28px;
+            padding: 0 10px;
+            border-radius: 999px;
+            background: #f1f4fb;
+            color: #55627d;
+            font-size: 12px;
+        }
+        .idic-companion__chip.fast {
+            background: #fff2df;
+            color: #b96c0a;
+        }
+        .idic-companion__chip.long {
+            background: #e9f6ea;
+            color: #2f7a40;
+        }
+        .idic-companion__modules {
+            min-height: 0;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .idic-companion__module {
+            padding: 12px;
+            border-radius: 14px;
+            background: #f7f8fc;
+            border: 1px solid rgba(99, 115, 145, 0.1);
+        }
+        .idic-companion__module-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+        .idic-companion__module-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #111827;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .idic-companion__module-title input {
+            width: 18px;
+            height: 18px;
+        }
+        .idic-companion__module-preview {
+            margin: 0;
+            color: #4b5563;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font: 13px/1.5 "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+        @media (min-width: 901px) {
+            #idic-companion-launcher {
+                right: 12px;
+                bottom: 86px;
+            }
+            #idic-companion-panel {
+                left: auto;
+                right: 12px;
+                top: auto;
+                bottom: 12px;
+                width: 388px;
+                height: min(70vh, 720px);
+                max-width: calc(100vw - 24px);
+            }
+        }
+    `;
 }
 
 function bindContextEvents() {
@@ -578,7 +1009,7 @@ function getSelectedRoleOption() {
 }
 
 function applyFloatingLayout() {
-    const root = document.getElementById('idic-companion-root');
+    const root = ui.rootHost || document.getElementById('idic-companion-root');
     const isMobile = window.matchMedia ? window.matchMedia('(max-width: 900px)').matches : window.innerWidth <= 900;
 
     if (root) {
