@@ -24,6 +24,7 @@ const DISCARD_TAGS = [
 const DEFAULT_SETTINGS = Object.freeze({
     bridgeUrl: '',
     bridgeToken: '',
+    bridgeAuthKey: '',
     apiUrl: '',
     apiKey: '',
     apiModel: '',
@@ -69,7 +70,7 @@ async function waitForSillyTavern() {
     const startedAt = Date.now();
     while (!(window.SillyTavern && typeof window.SillyTavern.getContext === 'function')) {
         if (Date.now() - startedAt > 30_000) {
-            throw new Error('SillyTavern context did not become available in time.');
+            throw new Error('酒馆环境加载超时');
         }
         await delay(150);
     }
@@ -83,7 +84,7 @@ function getContextSafe() {
 
 function getContext() {
     const context = getContextSafe();
-    if (!context) throw new Error('SillyTavern context is unavailable.');
+    if (!context) throw new Error('酒馆环境不可用');
     return context;
 }
 
@@ -100,6 +101,7 @@ function ensureSettings() {
     const normalized = {
         bridgeUrl: toTrimmedString(current.bridgeUrl),
         bridgeToken: toTrimmedString(current.bridgeToken),
+        bridgeAuthKey: toTrimmedString(current.bridgeAuthKey),
         apiUrl: toTrimmedString(current.apiUrl),
         apiKey: toTrimmedString(current.apiKey),
         apiModel: toTrimmedString(current.apiModel),
@@ -109,7 +111,7 @@ function ensureSettings() {
         maxFullTurnChars: clampNumber(current.maxFullTurnChars, 800, 12000, DEFAULT_SETTINGS.maxFullTurnChars),
         maxTranscriptTurns: clampNumber(current.maxTranscriptTurns, 4, 40, DEFAULT_SETTINGS.maxTranscriptTurns),
         statusSelectors: normalizeSelectorsText(current.statusSelectors || DEFAULT_SETTINGS.statusSelectors),
-        autoGenerateSummaryWhenMissing: current.autoGenerateSummaryWhenMissing !== false,
+        autoGenerateSummaryWhenMissing: current.autoGenerateSummaryWhenMissing === true,
     };
     context.extensionSettings[MODULE_NAME] = normalized;
     return normalized;
@@ -261,7 +263,7 @@ function normalizeModule(value) {
     return {
         id: toTrimmedString(source.id) || createId(),
         kind: toTrimmedString(source.kind) || 'other_text_block',
-        label: toTrimmedString(source.label) || 'Text',
+        label: toTrimmedString(source.label) || '文本',
         text,
         selected: source.selected !== false,
         persistence,
@@ -318,6 +320,7 @@ async function mountSettings() {
 
     ui.bridgeUrlInput = runtime.settingsRoot.querySelector('#idic-companion-bridge-url');
     ui.bridgeTokenInput = runtime.settingsRoot.querySelector('#idic-companion-bridge-token');
+    ui.bridgeAuthKeyInput = runtime.settingsRoot.querySelector('#idic-companion-bridge-auth-key');
     ui.apiUrlInput = runtime.settingsRoot.querySelector('#idic-companion-api-url');
     ui.apiKeyInput = runtime.settingsRoot.querySelector('#idic-companion-api-key');
     ui.apiModelInput = runtime.settingsRoot.querySelector('#idic-companion-api-model');
@@ -333,6 +336,7 @@ async function mountSettings() {
     const settings = ensureSettings();
     ui.bridgeUrlInput.value = settings.bridgeUrl;
     ui.bridgeTokenInput.value = settings.bridgeToken;
+    ui.bridgeAuthKeyInput.value = settings.bridgeAuthKey;
     ui.apiUrlInput.value = settings.apiUrl;
     ui.apiKeyInput.value = settings.apiKey;
     ui.apiModelInput.value = settings.apiModel;
@@ -357,6 +361,7 @@ async function mountSettings() {
 
     bindSetting(ui.bridgeUrlInput, 'bridgeUrl', (value) => toTrimmedString(value));
     bindSetting(ui.bridgeTokenInput, 'bridgeToken', (value) => toTrimmedString(value));
+    bindSetting(ui.bridgeAuthKeyInput, 'bridgeAuthKey', (value) => toTrimmedString(value));
     bindSetting(ui.apiUrlInput, 'apiUrl', (value) => toTrimmedString(value));
     bindSetting(ui.apiKeyInput, 'apiKey', (value) => toTrimmedString(value));
     bindSetting(ui.apiModelInput, 'apiModel', (value) => toTrimmedString(value));
@@ -385,81 +390,55 @@ async function mountSettings() {
 function mountPanel() {
     const wrapper = document.createElement('div');
     wrapper.innerHTML = `
-        <button id="idic-companion-launcher" class="menu_button" type="button">IDIC</button>
+        <button id="idic-companion-launcher" type="button" aria-label="打开陪读窗">
+            <span id="idic-companion-launcher-text" class="idic-companion__launcher-text">陪</span>
+        </button>
         <div id="idic-companion-panel" class="hidden">
             <div class="idic-companion__header">
+                <div id="idic-companion-avatar" class="idic-companion__avatar">陪</div>
                 <div class="idic-companion__title">
-                    <strong>IDIC Companion</strong>
-                    <span class="idic-companion__subtitle" id="idic-companion-subtitle">Read together, chat in parallel.</span>
+                    <strong id="idic-companion-chat-title">陪读</strong>
+                    <span class="idic-companion__subtitle" id="idic-companion-subtitle">未选角色</span>
                 </div>
-                <div class="idic-companion__header-actions">
-                    <span id="idic-companion-header-status" class="idic-companion__status">Idle</span>
-                    <button id="idic-companion-close" class="menu_button" type="button">Close</button>
-                </div>
+                <button id="idic-companion-close" class="idic-companion__icon-btn" type="button" aria-label="收起">－</button>
+            </div>
+            <div class="idic-companion__rolebar">
+                <select id="idic-companion-role-select">
+                    <option value="">选择角色</option>
+                </select>
+                <button id="idic-companion-refresh-roles" class="idic-companion__mini-btn" type="button">刷新</button>
+                <button id="idic-companion-open-sync-sheet" class="idic-companion__mini-btn accent" type="button">同步</button>
             </div>
             <div class="idic-companion__body">
-                <div class="idic-companion__scroll">
-                    <section class="idic-companion__section">
-                        <h4>Role</h4>
-                        <div class="idic-companion__bind-grid">
-                            <label>
-                                <span>Role List</span>
-                                <select id="idic-companion-role-select">
-                                    <option value="">Fetch roles from bridge first...</option>
-                                </select>
-                            </label>
-                            <label>
-                                <span>Snapshot Status</span>
-                                <input id="idic-companion-role-status" type="text" readonly />
-                            </label>
-                        </div>
-                        <div class="idic-companion__bind-column">
-                            <label><span>Role Preview</span><textarea id="idic-companion-role-preview" rows="5" readonly></textarea></label>
-                            <label><span>Prompt Preview</span><textarea id="idic-companion-prompt-preview" rows="5" readonly></textarea></label>
-                        </div>
-                        <div class="idic-companion__bind-actions">
-                            <button id="idic-companion-refresh-roles" class="menu_button" type="button">Refresh Roles</button>
-                            <button id="idic-companion-save-binding" class="menu_button" type="button">Use Selected Role</button>
-                            <button id="idic-companion-refresh-chat" class="menu_button" type="button">Refresh Chat Scan</button>
-                        </div>
-                        <div class="idic-companion__note">
-                            Roles come from your own Supabase role snapshot sync. Hippocampus is optional and only adds memory recall/write.
-                        </div>
-                    </section>
-
-                    <section class="idic-companion__section">
-                        <h4>Reading Context</h4>
-                        <div id="idic-companion-context-chips" class="idic-companion__chips"></div>
-                        <div class="idic-companion__turn-actions">
-                            <button id="idic-companion-rescan-latest" class="menu_button" type="button">Rescan Latest Turn</button>
-                            <button id="idic-companion-rollup-now" class="menu_button" type="button">Roll Up Older Summaries</button>
-                        </div>
-                    </section>
-
-                    <section class="idic-companion__section">
-                        <h4>Latest Turn Modules</h4>
-                        <div id="idic-companion-modules" class="idic-companion__modules">
-                            <div class="idic-companion__empty">No synced turn yet.</div>
-                        </div>
-                    </section>
-
-                    <section class="idic-companion__section">
-                        <h4>Companion Chat</h4>
-                        <div class="idic-companion__turn-actions">
-                            <button id="idic-companion-regenerate" class="menu_button" type="button">Regenerate</button>
-                            <button id="idic-companion-continue" class="menu_button" type="button">Continue</button>
-                        </div>
-                        <div id="idic-companion-transcript" class="idic-companion__transcript">
-                            <div class="idic-companion__empty">Pick a synced IDIC role, then talk beside the current SillyTavern chat.</div>
-                        </div>
-                    </section>
+                <div id="idic-companion-scroll" class="idic-companion__scroll">
+                    <div id="idic-companion-transcript" class="idic-companion__transcript">
+                        <div class="idic-companion__empty">先选角色</div>
+                    </div>
                 </div>
 
                 <div class="idic-companion__composer">
-                    <textarea id="idic-companion-input" placeholder="Talk to your IDIC companion about the current ST turn..."></textarea>
-                    <div class="idic-companion__composer-actions">
-                        <span id="idic-companion-footer-status" class="idic-companion__status">Waiting.</span>
-                        <button id="idic-companion-send" class="menu_button" type="button">Send</button>
+                    <div class="idic-companion__quick-actions">
+                        <button id="idic-companion-regenerate" class="idic-companion__mini-btn" type="button">重写</button>
+                        <button id="idic-companion-continue" class="idic-companion__mini-btn" type="button">续写</button>
+                        <span id="idic-companion-footer-status" class="idic-companion__status">待命</span>
+                    </div>
+                    <div class="idic-companion__composer-row">
+                        <textarea id="idic-companion-input" placeholder="聊聊这段剧情"></textarea>
+                        <button id="idic-companion-send" class="idic-companion__send-btn" type="button">发送</button>
+                    </div>
+                </div>
+
+                <div id="idic-companion-sync-sheet" class="idic-companion__sheet hidden">
+                    <div id="idic-companion-sync-sheet-mask" class="idic-companion__sheet-mask"></div>
+                    <div class="idic-companion__sheet-card">
+                        <div class="idic-companion__sheet-header">
+                            <strong>本楼同步</strong>
+                            <button id="idic-companion-close-sync-sheet" class="idic-companion__mini-btn" type="button">完成</button>
+                        </div>
+                        <div id="idic-companion-context-chips" class="idic-companion__chips"></div>
+                        <div id="idic-companion-modules" class="idic-companion__modules">
+                            <div class="idic-companion__empty">暂无内容</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -468,55 +447,43 @@ function mountPanel() {
     document.body.appendChild(wrapper);
 
     ui.launcher = document.getElementById('idic-companion-launcher');
+    ui.launcherText = document.getElementById('idic-companion-launcher-text');
     ui.panel = document.getElementById('idic-companion-panel');
+    ui.avatar = document.getElementById('idic-companion-avatar');
+    ui.chatTitle = document.getElementById('idic-companion-chat-title');
     ui.subtitle = document.getElementById('idic-companion-subtitle');
-    ui.headerStatus = document.getElementById('idic-companion-header-status');
     ui.footerStatus = document.getElementById('idic-companion-footer-status');
     ui.closeButton = document.getElementById('idic-companion-close');
     ui.contextChips = document.getElementById('idic-companion-context-chips');
     ui.modulesRoot = document.getElementById('idic-companion-modules');
+    ui.scrollRoot = document.getElementById('idic-companion-scroll');
     ui.transcriptRoot = document.getElementById('idic-companion-transcript');
     ui.input = document.getElementById('idic-companion-input');
     ui.sendButton = document.getElementById('idic-companion-send');
-    ui.saveBindingButton = document.getElementById('idic-companion-save-binding');
     ui.refreshRolesButton = document.getElementById('idic-companion-refresh-roles');
-    ui.refreshChatButton = document.getElementById('idic-companion-refresh-chat');
-    ui.rescanLatestButton = document.getElementById('idic-companion-rescan-latest');
-    ui.rollupNowButton = document.getElementById('idic-companion-rollup-now');
     ui.roleSelect = document.getElementById('idic-companion-role-select');
-    ui.roleStatus = document.getElementById('idic-companion-role-status');
-    ui.rolePreview = document.getElementById('idic-companion-role-preview');
-    ui.promptPreview = document.getElementById('idic-companion-prompt-preview');
     ui.regenerateButton = document.getElementById('idic-companion-regenerate');
     ui.continueButton = document.getElementById('idic-companion-continue');
+    ui.openSyncSheetButton = document.getElementById('idic-companion-open-sync-sheet');
+    ui.syncSheet = document.getElementById('idic-companion-sync-sheet');
+    ui.syncSheetMask = document.getElementById('idic-companion-sync-sheet-mask');
+    ui.closeSyncSheetButton = document.getElementById('idic-companion-close-sync-sheet');
 
     ui.launcher?.addEventListener('click', () => setPanelOpen(!runtime.panelOpen));
     ui.closeButton?.addEventListener('click', () => setPanelOpen(false));
-    ui.saveBindingButton?.addEventListener('click', async () => {
-        await saveBindingFromSelection();
-    });
     ui.refreshRolesButton?.addEventListener('click', () => {
         void fetchRoleOptions({ force: true, announce: true });
     });
-    ui.roleSelect?.addEventListener('change', () => {
+    ui.roleSelect?.addEventListener('change', async () => {
         renderBinding();
+        if (toTrimmedString(ui.roleSelect?.value)) {
+            await saveBindingFromSelection({ silent: true });
+            setStatus('角色已切换', 'success');
+        }
     });
-    ui.refreshChatButton?.addEventListener('click', async () => {
-        await syncStateFromChat({ captureLatestStatus: true, forceLatestRescan: true });
-        renderAll();
-        scheduleBackgroundMaintenance();
-    });
-    ui.rescanLatestButton?.addEventListener('click', async () => {
-        await syncStateFromChat({ captureLatestStatus: true, forceLatestRescan: true });
-        renderLatestModules();
-        scheduleBackgroundMaintenance();
-    });
-    ui.rollupNowButton?.addEventListener('click', async () => {
-        setStatus('Rolling up older summaries...', 'info');
-        await ensureStageRollups();
-        renderContextStats();
-        setStatus('Older summaries rolled up.', 'success');
-    });
+    ui.openSyncSheetButton?.addEventListener('click', () => setSyncSheetOpen(true));
+    ui.closeSyncSheetButton?.addEventListener('click', () => setSyncSheetOpen(false));
+    ui.syncSheetMask?.addEventListener('click', () => setSyncSheetOpen(false));
     ui.sendButton?.addEventListener('click', () => {
         void sendCompanionMessage();
     });
@@ -565,6 +532,22 @@ function setPanelOpen(open) {
     if (ui.panel) {
         ui.panel.classList.toggle('hidden', !runtime.panelOpen);
     }
+    if (ui.launcher) {
+        ui.launcher.classList.toggle('hidden', runtime.panelOpen);
+    }
+    if (!runtime.panelOpen) {
+        setSyncSheetOpen(false);
+    } else if (ui.input && !ui.input.disabled) {
+        window.requestAnimationFrame(() => {
+            ui.input?.focus();
+            if (ui.scrollRoot) ui.scrollRoot.scrollTop = ui.scrollRoot.scrollHeight;
+        });
+    }
+}
+
+function setSyncSheetOpen(open) {
+    if (!ui.syncSheet) return;
+    ui.syncSheet.classList.toggle('hidden', !open);
 }
 
 function getSelectedRoleOption() {
@@ -573,20 +556,31 @@ function getSelectedRoleOption() {
     return runtime.roleOptions.find((item) => item.charId === selectedId) || null;
 }
 
+function getBadgeText(name) {
+    const text = toTrimmedString(name);
+    return text ? Array.from(text)[0] : '陪';
+}
+
+function getActiveRoleName() {
+    const binding = ensureChatMeta()?.binding || createDefaultBinding();
+    const selectedRole = getSelectedRoleOption();
+    return selectedRole?.displayName || selectedRole?.charName || binding.displayName || binding.charName || '';
+}
+
 async function fetchRoleOptions(options = {}) {
     if (runtime.roleFetchInFlight) return;
     runtime.roleFetchInFlight = true;
     const announce = options.announce !== false;
-    if (announce) setStatus('Fetching synced IDIC roles...', 'info');
+    if (announce) setStatus('正在读取角色...', 'info');
     try {
         const response = await callBridge('list_roles', {});
         runtime.roleOptions = Array.isArray(response.roles) ? response.roles : [];
         renderBinding();
         if (announce) {
-            setStatus(runtime.roleOptions.length ? 'Role list refreshed.' : 'No synced roles found yet.', runtime.roleOptions.length ? 'success' : 'info');
+            setStatus(runtime.roleOptions.length ? '角色列表已刷新' : '还没有同步到角色', runtime.roleOptions.length ? 'success' : 'info');
         }
     } catch (error) {
-        if (announce) setStatus(`Role fetch failed: ${error.message}`, 'error');
+        if (announce) setStatus(`角色读取失败：${error.message}`, 'error');
         throw error;
     } finally {
         runtime.roleFetchInFlight = false;
@@ -598,7 +592,7 @@ async function saveBindingFromSelection(options = {}) {
     if (!meta) return;
     const role = getSelectedRoleOption();
     if (!role || !role.snapshot) {
-        if (!options.silent) notify('Pick a synced role first.', 'warning');
+        if (!options.silent) notify('请先选角色', 'warning');
         return;
     }
 
@@ -623,7 +617,7 @@ async function saveBindingFromSelection(options = {}) {
     await saveChatMeta();
     renderBinding();
     if (!options.silent) {
-        notify(`Now reading with ${meta.binding.displayName || meta.binding.charName}.`, 'success');
+        notify(`已切换到 ${meta.binding.displayName || meta.binding.charName}`, 'success');
     }
 }
 
@@ -633,7 +627,7 @@ function renderBinding() {
 
     if (ui.roleSelect) {
         const currentValue = toTrimmedString(ui.roleSelect.value) || binding.selectedRoleId || binding.charId;
-        const options = ['<option value="">Select a synced role...</option>']
+        const options = ['<option value="">选择角色</option>']
             .concat(runtime.roleOptions.map((role) => {
                 const label = role.displayName && role.displayName !== role.charName
                     ? `${role.displayName} (${role.charName || role.charId})`
@@ -657,29 +651,36 @@ function renderBinding() {
         })
         : binding;
 
-    if (ui.roleStatus) {
-        const pieces = [];
-        if (effective.charId) pieces.push(`char=${effective.charId}`);
-        pieces.push(effective.hippocampusEnabled ? 'hippocampus on' : 'hippocampus off');
-        if (effective.snapshotUpdatedAt) pieces.push(`snapshot ${effective.snapshotUpdatedAt}`);
-        ui.roleStatus.value = pieces.join(' | ');
-    }
-    if (ui.rolePreview) {
-        ui.rolePreview.value = [
-            effective.displayName || effective.charName || '',
-            effective.userName ? `User: ${effective.userName}` : '',
-            effective.charPersona || '',
-        ].filter(Boolean).join('\n\n');
-    }
-    if (ui.promptPreview) {
-        ui.promptPreview.value = clipText(effective.promptProfile || effective.systemPrompt || effective.userPersona || '', 2400);
+    const roleName = effective.displayName || effective.charName || '';
+    const badgeText = getBadgeText(roleName);
+    if (ui.chatTitle) ui.chatTitle.textContent = roleName || '陪读';
+    if (ui.avatar) ui.avatar.textContent = badgeText;
+    if (ui.launcherText) ui.launcherText.textContent = badgeText;
+    if (ui.launcher) {
+        ui.launcher.classList.toggle('active', Boolean(roleName));
+        ui.launcher.setAttribute('aria-label', roleName ? `打开和${roleName}的陪读窗` : '打开陪读窗');
     }
     if (ui.subtitle) {
-        const label = effective.charName
-            ? `Reading with ${effective.displayName || effective.charName}${effective.hippocampusEnabled ? ' · hippocampus ready' : ''}`
-            : 'Pick a synced IDIC role for this SillyTavern chat.';
-        ui.subtitle.textContent = label;
+        ui.subtitle.textContent = roleName
+            ? (effective.hippocampusEnabled ? '海马体在线' : '普通模式')
+            : '未选角色';
     }
+    if (ui.input) {
+        ui.input.placeholder = roleName ? `和${roleName}聊聊这段剧情` : '聊聊这段剧情';
+        ui.input.disabled = !roleName || runtime.sendInFlight;
+    }
+    renderComposerState(roleName);
+    if (ui.openSyncSheetButton) ui.openSyncSheetButton.disabled = !runtime.latestTurnId;
+}
+
+function renderComposerState(roleName = '') {
+    const transcript = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript : [];
+    const hasUserTurn = transcript.some((item) => item.role === 'user' && !item.pending);
+    const hasAssistantTurn = transcript.some((item) => item.role === 'assistant' && !item.pending && item.text);
+    const baseDisabled = !roleName || runtime.sendInFlight;
+    if (ui.sendButton) ui.sendButton.disabled = baseDisabled;
+    if (ui.regenerateButton) ui.regenerateButton.disabled = baseDisabled || !hasUserTurn;
+    if (ui.continueButton) ui.continueButton.disabled = baseDisabled || !hasAssistantTurn;
 }
 
 async function syncStateFromChat(options = {}) {
@@ -766,7 +767,7 @@ function buildTurnCandidates(chat) {
             aiIndex: index,
             userText,
             aiText,
-            aiName: toTrimmedString(message.name) || 'Assistant',
+            aiName: toTrimmedString(message.name) || '角色',
             sourceHash: hashText(`${userKey}|${aiKey}|${userText}|${aiText}`),
         });
         pendingUser = null;
@@ -837,7 +838,7 @@ function getBuiltInSummaryState(turn) {
     const summaryModules = turn.modules.filter((module) => module.selected && module.kind === 'summary' && module.persistence === 'long' && module.text);
     if (summaryModules.length === 0) return null;
     return {
-        title: summaryModules[0].label || 'Summary',
+        title: summaryModules[0].label || '摘要',
         summary: summaryModules.map((module) => module.text).join('\n\n'),
     };
 }
@@ -1081,26 +1082,35 @@ function renderContextStats() {
         : [];
 
     const chips = [
-        { text: `Recent full turns: ${recentTurns.length}`, cls: 'long' },
-        { text: `Older summaries: ${olderSummaries.length}`, cls: 'long' },
-        { text: `Stage rollups: ${state.stageSummaries.length}`, cls: 'long' },
-        { text: `Fast-food modules: ${fastModules.length}`, cls: 'fast' },
+        { text: `近文 ${recentTurns.length}`, cls: 'long' },
+        { text: `旧摘 ${olderSummaries.length}`, cls: 'long' },
+        { text: `阶段 ${state.stageSummaries.length}`, cls: 'long' },
+        { text: `快餐 ${fastModules.length}`, cls: 'fast' },
     ];
     ui.contextChips.innerHTML = chips
         .map((chip) => `<span class="idic-companion__chip ${chip.cls}">${escapeHtml(chip.text)}</span>`)
         .join('');
+    const latest = runtime.latestTurnId ? state.turns[runtime.latestTurnId] : null;
+    if (ui.openSyncSheetButton) {
+        if (latest && Array.isArray(latest.modules) && latest.modules.length > 0) {
+            const selectedCount = latest.modules.filter((module) => module.selected !== false).length;
+            ui.openSyncSheetButton.textContent = `同步 ${selectedCount}/${latest.modules.length}`;
+        } else {
+            ui.openSyncSheetButton.textContent = '同步';
+        }
+    }
 }
 
 function renderLatestModules() {
     if (!ui.modulesRoot) return;
     const latest = runtime.latestTurnId ? runtime.chatState?.turns?.[runtime.latestTurnId] : null;
     if (!latest) {
-        ui.modulesRoot.innerHTML = '<div class="idic-companion__empty">No synced turn yet.</div>';
+        ui.modulesRoot.innerHTML = '<div class="idic-companion__empty">暂无内容</div>';
         return;
     }
 
     if (!Array.isArray(latest.modules) || latest.modules.length === 0) {
-        ui.modulesRoot.innerHTML = '<div class="idic-companion__empty">Latest turn has no detectable modules.</div>';
+        ui.modulesRoot.innerHTML = '<div class="idic-companion__empty">这楼没扫到内容</div>';
         return;
     }
 
@@ -1111,7 +1121,7 @@ function renderLatestModules() {
                     <input type="checkbox" data-module-toggle="${escapeHtml(module.id)}" ${module.selected ? 'checked' : ''} />
                     <span>${escapeHtml(module.label)}</span>
                 </label>
-                <span class="idic-companion__chip ${module.persistence === 'fast' ? 'fast' : 'long'}">${module.persistence === 'fast' ? 'Fast' : 'Long'}</span>
+                <span class="idic-companion__chip ${module.persistence === 'fast' ? 'fast' : 'long'}">${module.persistence === 'fast' ? '本楼即忘' : '长期保留'}</span>
             </div>
             <pre class="idic-companion__module-preview">${escapeHtml(module.preview)}</pre>
         </div>
@@ -1143,22 +1153,27 @@ function renderLatestModules() {
 function renderTranscript() {
     if (!ui.transcriptRoot) return;
     const transcript = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript : [];
+    const roleName = getActiveRoleName();
+    renderComposerState(roleName);
     if (transcript.length === 0) {
-        ui.transcriptRoot.innerHTML = '<div class="idic-companion__empty">Pick a synced role, then chat with that IDIC character beside the current ST story.</div>';
+        ui.transcriptRoot.innerHTML = `<div class="idic-companion__empty">${roleName ? '还没开聊' : '先选角色'}</div>`;
         return;
     }
+    const binding = ensureChatMeta()?.binding || createDefaultBinding();
+    const assistantName = binding.displayName || binding.charName || '陪读';
     ui.transcriptRoot.innerHTML = transcript.map((item) => {
         const role = item.role;
         const cls = role === 'user' ? 'user' : (role === 'assistant' ? 'assistant' : 'system');
         const timestamp = new Date(item.createdAt).toLocaleTimeString();
+        const speaker = role === 'user' ? '你' : (role === 'assistant' ? assistantName : '系统');
         return `
             <div class="idic-companion__bubble ${cls}">
-                <div>${escapeHtml(item.text)}</div>
-                <div class="idic-companion__bubble-meta">${escapeHtml(timestamp)}${item.pending ? ' · pending' : ''}</div>
+                <div class="idic-companion__bubble-box">${escapeHtml(item.text)}</div>
+                <div class="idic-companion__bubble-meta">${escapeHtml(speaker)} · ${escapeHtml(timestamp)}${item.pending ? ' · 发送中' : ''}</div>
             </div>
         `;
     }).join('');
-    ui.transcriptRoot.scrollTop = ui.transcriptRoot.scrollHeight;
+    if (ui.scrollRoot) ui.scrollRoot.scrollTop = ui.scrollRoot.scrollHeight;
 }
 
 function scheduleBackgroundMaintenance() {
@@ -1210,7 +1225,7 @@ async function ensureTurnSummary(turnId, options = {}) {
 
     turn.summaryStatus = 'running';
     await persistChatState();
-    if (!options.silent) setStatus('Summarizing archived ST turns...', 'info');
+    if (!options.silent) setStatus('正在整理旧楼摘要...', 'info');
 
     try {
         const response = await callBridge('summarize_turn', {
@@ -1233,7 +1248,7 @@ async function ensureTurnSummary(turnId, options = {}) {
         turn.summaryOrigin = '';
         await persistChatState();
         if (!options.silent) {
-            setStatus(`Turn summary failed: ${error.message}`, 'error');
+            setStatus(`摘要生成失败：${error.message}`, 'error');
         }
     }
 }
@@ -1246,7 +1261,7 @@ async function ensureStageRollups(silent = false) {
     let pending = olderTurns.filter((turn) => turn.summary && !turn.stageId);
     while (pending.length >= settings.stageRollupSize) {
         const chunk = pending.slice(0, settings.stageRollupSize);
-        if (!silent) setStatus('Rolling up archived ST summaries...', 'info');
+        if (!silent) setStatus('正在合并旧摘要...', 'info');
         const response = await callBridge('rollup_stage', {
             binding: getBindingPayload(),
             apiConfig: getApiConfigPayload(),
@@ -1259,7 +1274,7 @@ async function ensureStageRollups(silent = false) {
         const stageId = createId();
         state.stageSummaries.push({
             id: stageId,
-            title: toTrimmedString(response.title) || 'Stage Summary',
+            title: toTrimmedString(response.title) || '阶段总结',
             summary: toTrimmedString(response.summary),
             turnIds: chunk.map((turn) => turn.turnId),
             createdAt: Date.now(),
@@ -1320,13 +1335,13 @@ async function sendCompanionMessage() {
     await saveBindingFromSelection({ silent: true });
     const binding = getBindingPayload();
     if (!binding.charId || !binding.charName || (!binding.charPersona && !binding.promptProfile)) {
-        notify('Pick a synced role first.', 'warning');
+        notify('请先选角色', 'warning');
         setPanelOpen(true);
         return;
     }
 
     runtime.sendInFlight = true;
-    setStatus('Preparing reading context...', 'info');
+    setStatus('正在整理上下文...', 'info');
     await syncStateFromChat({ captureLatestStatus: true, forceLatestRescan: false });
     await scheduleImmediateContextHydration();
 
@@ -1338,7 +1353,7 @@ async function sendCompanionMessage() {
     try {
         const readingContext = buildReadingContextPayload();
         const transcript = buildTranscriptPayload();
-        setStatus('Waiting for IDIC companion reply...', 'info');
+        setStatus('对方正在输入...', 'info');
 
         const response = await callBridge('reply', {
             binding,
@@ -1354,23 +1369,24 @@ async function sendCompanionMessage() {
 
         replaceTranscriptEntry(pendingAssistant.id, {
             role: 'assistant',
-            text: toTrimmedString(response.reply) || '（bridge returned an empty reply）',
+            text: toTrimmedString(response.reply) || '没有收到回复',
             pending: false,
         });
         trimTranscript();
         await persistChatState();
         renderTranscript();
-        setStatus(`Reply ready · recalled ${Number(response.memoryCount || 0)} hippocampus memories.`, 'success');
+        setStatus(`已回复，命中 ${Number(response.memoryCount || 0)} 条海马体记忆`, 'success');
     } catch (error) {
         replaceTranscriptEntry(pendingAssistant.id, {
             role: 'system',
-            text: `Bridge request failed: ${error.message}`,
+            text: `连接失败：${error.message}`,
             pending: false,
         });
         renderTranscript();
-        setStatus(`Bridge failed: ${error.message}`, 'error');
+        setStatus(`连接失败：${error.message}`, 'error');
     } finally {
         runtime.sendInFlight = false;
+        renderBinding();
     }
 }
 
@@ -1380,7 +1396,7 @@ async function regenerateCompanionReply() {
     const lastAssistant = [...transcript].reverse().find((item) => item.role === 'assistant' && !item.pending);
     const lastUserIndex = findLastTranscriptIndexByRole(transcript, 'user');
     if (lastUserIndex < 0) {
-        notify('There is no user message to regenerate from yet.', 'info');
+        notify('还没有可重写的上一轮', 'info');
         return;
     }
 
@@ -1393,7 +1409,7 @@ async function regenerateCompanionReply() {
     await sendBridgeReply({
         userMessage: lastUser.text,
         replyMode: 'regenerate',
-        statusLabel: 'Regenerating companion reply...',
+        statusLabel: '正在重写...',
     }).catch(async (error) => {
         if (lastAssistant) {
             runtime.chatState.transcript = transcript;
@@ -1409,7 +1425,7 @@ async function continueCompanionReply() {
     const transcript = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript.slice() : [];
     const lastAssistant = [...transcript].reverse().find((item) => item.role === 'assistant' && !item.pending);
     if (!lastAssistant || !lastAssistant.text) {
-        notify('There is no assistant reply to continue yet.', 'info');
+        notify('还没有可续写的回复', 'info');
         return;
     }
 
@@ -1417,7 +1433,7 @@ async function continueCompanionReply() {
         userMessage: '',
         replyMode: 'continue',
         continueFrom: lastAssistant.text,
-        statusLabel: 'Continuing companion reply...',
+        statusLabel: '正在续写...',
     });
 }
 
@@ -1425,7 +1441,7 @@ async function sendBridgeReply(options) {
     await saveBindingFromSelection({ silent: true });
     const binding = getBindingPayload();
     if (!binding.charId || !binding.charName || (!binding.charPersona && !binding.promptProfile)) {
-        notify('Pick a synced role first.', 'warning');
+        notify('请先选角色', 'warning');
         return;
     }
 
@@ -1435,7 +1451,7 @@ async function sendBridgeReply(options) {
 
     const pendingAssistant = pushTranscriptEntry({ role: 'assistant', text: '…', pending: true });
     renderTranscript();
-    setStatus(options.statusLabel || 'Waiting for companion reply...', 'info');
+    setStatus(options.statusLabel || '对方正在输入...', 'info');
 
     try {
         const response = await callBridge('reply', {
@@ -1452,24 +1468,25 @@ async function sendBridgeReply(options) {
         });
         replaceTranscriptEntry(pendingAssistant.id, {
             role: 'assistant',
-            text: toTrimmedString(response.reply) || '(bridge returned an empty reply)',
+            text: toTrimmedString(response.reply) || '没有收到回复',
             pending: false,
         });
         trimTranscript();
         await persistChatState();
         renderTranscript();
-        setStatus(`Reply ready · recalled ${Number(response.memoryCount || 0)} hippocampus memories.`, 'success');
+        setStatus(`已回复，命中 ${Number(response.memoryCount || 0)} 条海马体记忆`, 'success');
     } catch (error) {
         replaceTranscriptEntry(pendingAssistant.id, {
             role: 'system',
-            text: `Bridge request failed: ${error.message}`,
+            text: `连接失败：${error.message}`,
             pending: false,
         });
         renderTranscript();
-        setStatus(`Bridge failed: ${error.message}`, 'error');
+        setStatus(`连接失败：${error.message}`, 'error');
         throw error;
     } finally {
         runtime.sendInFlight = false;
+        renderBinding();
     }
 }
 
@@ -1506,7 +1523,7 @@ function buildReadingContextPayload() {
             if (!settings.autoGenerateSummaryWhenMissing && hasSelectedLongModules(turn)) {
                 return {
                     turnId: turn.turnId,
-                    title: 'Raw fallback',
+                    title: '原文补位',
                     summary: buildFallbackOlderTurnText(turn, settings.maxFullTurnChars),
                     source: 'fallback_raw',
                 };
@@ -1545,7 +1562,7 @@ function serializeRecentTurn(turn, budget) {
     return {
         turnId: turn.turnId,
         userText: clipText(turn.userText, userBudget),
-        aiSpeaker: turn.aiName || 'Assistant',
+        aiSpeaker: turn.aiName || '角色',
         aiModules: selectedLongModules.map((module) => ({
             label: module.label,
             kind: module.kind,
@@ -1557,7 +1574,7 @@ function serializeRecentTurn(turn, budget) {
 function buildFallbackOlderTurnText(turn, budget) {
     const selectedLongModules = getSelectedModules(turn, 'long');
     const parts = [`用户：${turn.userText || '（无）'}`]
-        .concat(selectedLongModules.map((module) => `${turn.aiName || 'Assistant'} / ${module.label}：${module.text}`));
+        .concat(selectedLongModules.map((module) => `${turn.aiName || '角色'} / ${module.label}：${module.text}`));
     return clipText(parts.join('\n'), Math.max(1200, budget));
 }
 
@@ -1616,7 +1633,7 @@ async function callBridge(action, payload) {
     const settings = ensureSettings();
     const bridgeUrl = toTrimmedString(settings.bridgeUrl);
     if (!bridgeUrl) {
-        throw new Error('Bridge URL is empty.');
+        throw new Error('还没填写中转地址');
     }
 
     const headers = {
@@ -1624,6 +1641,10 @@ async function callBridge(action, payload) {
     };
     if (settings.bridgeToken) {
         headers['x-idic-bridge-token'] = settings.bridgeToken;
+    }
+    if (settings.bridgeAuthKey) {
+        headers.authorization = `Bearer ${settings.bridgeAuthKey}`;
+        headers.apikey = settings.bridgeAuthKey;
     }
 
     const response = await fetch(bridgeUrl, {
@@ -1717,7 +1738,7 @@ function escapeHtml(value) {
 }
 
 function setStatus(message, kind = 'info') {
-    const text = toTrimmedString(message) || 'Idle';
+    const text = toTrimmedString(message) || '待命';
     if (ui.headerStatus) ui.headerStatus.textContent = text;
     if (ui.footerStatus) ui.footerStatus.textContent = text;
     if (kind === 'error') console.error(`[${MODULE_NAME}] ${text}`);

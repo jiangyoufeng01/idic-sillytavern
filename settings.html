@@ -1,70 +1,70 @@
 <div class="idic-companion-settings">
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-            <b>IDIC Companion</b>
+            <b>IDIC 陪读窗</b>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
             <div class="idic-companion-settings-grid">
                 <label class="idic-companion-settings-field">
-                    <span>Bridge URL</span>
-                    <input id="idic-companion-bridge-url" type="text" placeholder="https://YOUR-PROJECT.functions.supabase.co/idic-companion-bridge" />
+                    <span>中转地址</span>
+                    <input id="idic-companion-bridge-url" type="text" placeholder="https://你的项目.functions.supabase.co/idic-companion-bridge" />
                 </label>
                 <label class="idic-companion-settings-field">
-                    <span>Bridge Token (optional)</span>
-                    <input id="idic-companion-bridge-token" type="password" placeholder="Optional shared token" />
+                    <span>中转令牌</span>
+                    <input id="idic-companion-bridge-token" type="password" placeholder="没有就留空" />
                 </label>
                 <label class="idic-companion-settings-field">
-                    <span>IDIC Main API URL</span>
+                    <span>函数密钥</span>
+                    <input id="idic-companion-bridge-auth-key" type="password" placeholder="报未授权时再填项目匿名密钥" />
+                </label>
+                <label class="idic-companion-settings-field">
+                    <span>主接口地址</span>
                     <input id="idic-companion-api-url" type="text" placeholder="https://api.openai.com/v1" />
                 </label>
                 <label class="idic-companion-settings-field">
-                    <span>IDIC Main API Key</span>
-                    <input id="idic-companion-api-key" type="password" placeholder="Used for companion replies and optional summaries" />
+                    <span>主接口密钥</span>
+                    <input id="idic-companion-api-key" type="password" placeholder="用于陪读回复" />
                 </label>
                 <label class="idic-companion-settings-field">
-                    <span>IDIC Main Model</span>
-                    <input id="idic-companion-api-model" type="text" placeholder="gpt-4.1-mini / your main chat model" />
+                    <span>模型名</span>
+                    <input id="idic-companion-api-model" type="text" placeholder="跟主聊一致就行" />
                 </label>
                 <label class="idic-companion-settings-field">
-                    <span>API Temperature</span>
+                    <span>温度</span>
                     <input id="idic-companion-api-temperature" type="number" min="0" max="2" step="0.05" />
                 </label>
                 <label class="idic-companion-settings-field">
-                    <span>Recent Full Turns</span>
+                    <span>最近原文楼数</span>
                     <input id="idic-companion-recent-full-turns" type="number" min="1" max="6" />
                 </label>
                 <label class="idic-companion-settings-field">
-                    <span>Rollup Size</span>
+                    <span>阶段总结楼数</span>
                     <input id="idic-companion-rollup-size" type="number" min="5" max="60" />
                 </label>
                 <label class="idic-companion-settings-field">
-                    <span>Max Full Turn Chars</span>
+                    <span>单楼最大字数</span>
                     <input id="idic-companion-max-turn-chars" type="number" min="800" max="12000" step="100" />
                 </label>
                 <label class="idic-companion-settings-field">
-                    <span>Max Transcript Turns</span>
+                    <span>陪读记忆轮数</span>
                     <input id="idic-companion-max-transcript-turns" type="number" min="4" max="40" />
                 </label>
             </div>
 
             <label class="idic-companion-settings-field">
-                    <span>Status Bar Selectors</span>
-                    <textarea id="idic-companion-status-selectors" rows="5" placeholder=".status-bar&#10;[data-status-bar]&#10;.mes_status"></textarea>
+                <span>状态栏选择器</span>
+                <textarea id="idic-companion-status-selectors" rows="5" placeholder=".status-bar&#10;[data-status-bar]&#10;.mes_status"></textarea>
             </label>
 
             <label class="idic-companion-settings-field idic-companion-settings-check">
                 <input id="idic-companion-auto-summary-toggle" type="checkbox" />
-                <span>When a turn has no built-in summary module, let the bridge auto-generate one.</span>
+                <span>没有现成摘要时自动补摘要</span>
             </label>
 
             <div class="idic-companion-settings-actions">
-                <button id="idic-companion-open-panel" class="menu_button">Open Companion Panel</button>
+                <button id="idic-companion-open-panel" class="menu_button">打开小窗</button>
             </div>
-
-            <p class="idic-companion-settings-note">
-                The bridge token and main API key are stored client-side by SillyTavern. Treat them as convenience-only, not as strong secret storage.
-            </p>
         </div>
     </div>
 </div>

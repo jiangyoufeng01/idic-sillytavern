@@ -62,6 +62,7 @@ In short:
 - Install this extension from GitHub.
 - Fill `Bridge URL`
 - optional `Bridge Token`
+- if your Supabase function still verifies JWT, also fill `Function Auth Key` with the project's `Legacy anon key`
 - fill your `IDIC Main API URL / Key / Model`
 - open the panel
 - click `Refresh Roles`

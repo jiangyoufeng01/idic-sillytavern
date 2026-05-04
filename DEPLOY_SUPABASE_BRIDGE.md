@@ -61,6 +61,7 @@ In the extension settings, fill:
 
 - `Bridge URL`
 - optional `Bridge Token`
+- if your function returns `UNAUTHORIZED_NO_AUTH_HEADER`, fill `Function Auth Key` with the project's `Legacy anon key`
 - `IDIC Main API URL`
 - `IDIC Main API Key`
 - `IDIC Main Model`
