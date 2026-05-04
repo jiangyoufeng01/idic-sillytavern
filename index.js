@@ -389,6 +389,7 @@ async function mountSettings() {
 
 function mountPanel() {
     const wrapper = document.createElement('div');
+    wrapper.id = 'idic-companion-root';
     wrapper.innerHTML = `
         <button id="idic-companion-launcher" type="button" aria-label="打开陪读窗">
             <span id="idic-companion-launcher-text" class="idic-companion__launcher-text">陪</span>
@@ -469,6 +470,7 @@ function mountPanel() {
     ui.syncSheetMask = document.getElementById('idic-companion-sync-sheet-mask');
     ui.closeSyncSheetButton = document.getElementById('idic-companion-close-sync-sheet');
 
+    applyFloatingLayout();
     if (ui.panel) ui.panel.style.display = 'none';
     if (ui.launcher) ui.launcher.style.display = 'flex';
 
@@ -502,6 +504,7 @@ function mountPanel() {
             void sendCompanionMessage();
         }
     });
+    window.addEventListener('resize', applyFloatingLayout);
 }
 
 function bindContextEvents() {
@@ -532,6 +535,7 @@ function bindContextEvents() {
 
 function setPanelOpen(open) {
     runtime.panelOpen = Boolean(open);
+    applyFloatingLayout();
     if (ui.panel) {
         ui.panel.classList.toggle('hidden', !runtime.panelOpen);
         ui.panel.style.display = runtime.panelOpen ? 'flex' : 'none';
@@ -559,6 +563,60 @@ function getSelectedRoleOption() {
     const selectedId = toTrimmedString(ui.roleSelect?.value);
     if (!selectedId) return null;
     return runtime.roleOptions.find((item) => item.charId === selectedId) || null;
+}
+
+function applyFloatingLayout() {
+    const root = document.getElementById('idic-companion-root');
+    const isMobile = window.matchMedia ? window.matchMedia('(max-width: 900px)').matches : window.innerWidth <= 900;
+
+    if (root) {
+        Object.assign(root.style, {
+            position: 'fixed',
+            inset: '0',
+            zIndex: '49999',
+            pointerEvents: 'none',
+            overflow: 'visible',
+        });
+    }
+
+    if (ui.launcher) {
+        Object.assign(ui.launcher.style, {
+            position: 'fixed',
+            right: isMobile ? '10px' : '12px',
+            bottom: isMobile ? '78px' : '86px',
+            width: isMobile ? '50px' : '52px',
+            height: isMobile ? '50px' : '52px',
+            display: runtime.panelOpen ? 'none' : 'flex',
+            pointerEvents: 'auto',
+            zIndex: '50001',
+        });
+    }
+
+    if (ui.panel) {
+        Object.assign(ui.panel.style, isMobile
+            ? {
+                position: 'fixed',
+                left: '8px',
+                right: '8px',
+                top: '88px',
+                bottom: '8px',
+                width: 'auto',
+                height: 'auto',
+            }
+            : {
+                position: 'fixed',
+                left: 'auto',
+                right: '12px',
+                top: 'auto',
+                bottom: '12px',
+                width: '388px',
+                height: 'min(70vh, 720px)',
+                maxWidth: 'calc(100vw - 24px)',
+            });
+        ui.panel.style.pointerEvents = 'auto';
+        ui.panel.style.zIndex = '50000';
+        ui.panel.style.display = runtime.panelOpen ? 'flex' : 'none';
+    }
 }
 
 function getBadgeText(name) {
