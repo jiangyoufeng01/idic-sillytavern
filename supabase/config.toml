@@ -1,0 +1,2 @@
+[functions.idic-companion-bridge]
+verify_jwt = false

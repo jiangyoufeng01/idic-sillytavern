@@ -2321,21 +2321,24 @@ function getBridgeAuthKey(settings) {
     const explicit = toTrimmedString(settings.bridgeAuthKey);
     if (explicit) return explicit;
     const token = toTrimmedString(settings.bridgeToken);
-    return looksLikeJwt(token) ? token : '';
+    return looksLikeSupabaseClientKey(token) ? token : '';
 }
 
-function looksLikeJwt(value) {
-    return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(toTrimmedString(value));
+function looksLikeSupabaseClientKey(value) {
+    const text = toTrimmedString(value);
+    return /^sb_publishable_/i.test(text)
+        || /^sb_secret_/i.test(text)
+        || /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(text);
 }
 
 function getBridgeErrorMessage(parsed, raw, status) {
     const code = toTrimmedString(parsed?.code || parsed?.error_code);
     const error = toTrimmedString(parsed?.error || parsed?.message || raw);
     if (code === 'UNAUTHORIZED_NO_AUTH_HEADER' || /NO_AUTH_HEADER/i.test(error)) {
-        return '函数缺少授权：请在设置里的「函数密钥」填 Supabase anon key';
+        return '函数还开着 JWT 校验：请重新部署 bridge，并确保 supabase/config.toml 里 verify_jwt = false';
     }
     if (/JWT|invalid token|unauthorized/i.test(error)) {
-        return '函数密钥不对：请检查 Supabase anon key';
+        return '函数授权不匹配：publishable key 需要关闭 Edge Function 的 JWT 校验';
     }
     return error || `HTTP ${status}`;
 }

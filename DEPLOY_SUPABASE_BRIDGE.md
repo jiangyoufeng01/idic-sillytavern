@@ -13,12 +13,19 @@ This creates the role snapshot table used by the SillyTavern companion plugin.
 Deploy:
 
 - `supabase/functions/idic-companion-bridge`
+- `supabase/config.toml`
 
 Command:
 
 ```bash
 supabase functions deploy idic-companion-bridge
 ```
+
+Important:
+
+- This bridge is configured with `verify_jwt = false` in `supabase/config.toml`.
+- Supabase's newer `publishable key` is not the old JWT-style anon key.
+- If the function was deployed before this config existed, redeploy it once.
 
 ## 3. Optional environment variables
 
@@ -60,11 +67,13 @@ Then click:
 In the extension settings, fill:
 
 - `Bridge URL`
-- optional `Bridge Token`
-- if your function returns `UNAUTHORIZED_NO_AUTH_HEADER`, fill `Function Auth Key` with the project's `Legacy anon key`
+- optional `Bridge Token` if you set `IDIC_COMPANION_BRIDGE_TOKEN`
+- optional `Function Auth Key` can be left empty after redeploying with `verify_jwt = false`
 - `IDIC Main API URL`
 - `IDIC Main API Key`
 - `IDIC Main Model`
+
+If you see `UNAUTHORIZED_NO_AUTH_HEADER`, the function is still using old JWT verification. Redeploy the bridge with the included `supabase/config.toml`.
 
 Then open the side panel, refresh roles, and pick the character you want for this ST chat.
 

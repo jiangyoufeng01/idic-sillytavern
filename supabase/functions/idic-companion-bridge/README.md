@@ -38,6 +38,15 @@ The extension can send API config per request, so these are only fallback defaul
 supabase functions deploy idic-companion-bridge
 ```
 
+This repo includes `supabase/config.toml`:
+
+```toml
+[functions.idic-companion-bridge]
+verify_jwt = false
+```
+
+Keep that config when deploying. It allows users to use Supabase's current `publishable key` setup instead of hunting for a legacy anon JWT key.
+
 Function URL:
 
 ```text

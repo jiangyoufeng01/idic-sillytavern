@@ -51,6 +51,7 @@ In short:
 
 2. Deploy:
 - `supabase/functions/idic-companion-bridge`
+- keep `supabase/config.toml`, which sets `verify_jwt = false`
 
 3. In IDIC:
 - Open the hippocampus settings page.
@@ -61,12 +62,14 @@ In short:
 4. In SillyTavern:
 - Install this extension from GitHub.
 - Fill `Bridge URL`
-- optional `Bridge Token`
-- if your Supabase function still verifies JWT, also fill `Function Auth Key` with the project's `Legacy anon key`
+- optional `Bridge Token` only if you set `IDIC_COMPANION_BRIDGE_TOKEN`
+- `Function Auth Key` can stay empty after the bridge is redeployed with `verify_jwt = false`
 - fill your `IDIC Main API URL / Key / Model`
 - open the panel
 - click `Refresh Roles`
 - choose a role
+
+If role refresh says `UNAUTHORIZED_NO_AUTH_HEADER`, redeploy the bridge. That means Supabase is still running it with old JWT verification.
 
 ## What gets sent to the bridge
 
