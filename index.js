@@ -469,6 +469,9 @@ function mountPanel() {
     ui.syncSheetMask = document.getElementById('idic-companion-sync-sheet-mask');
     ui.closeSyncSheetButton = document.getElementById('idic-companion-close-sync-sheet');
 
+    if (ui.panel) ui.panel.style.display = 'none';
+    if (ui.launcher) ui.launcher.style.display = 'flex';
+
     ui.launcher?.addEventListener('click', () => setPanelOpen(!runtime.panelOpen));
     ui.closeButton?.addEventListener('click', () => setPanelOpen(false));
     ui.refreshRolesButton?.addEventListener('click', () => {
@@ -531,9 +534,11 @@ function setPanelOpen(open) {
     runtime.panelOpen = Boolean(open);
     if (ui.panel) {
         ui.panel.classList.toggle('hidden', !runtime.panelOpen);
+        ui.panel.style.display = runtime.panelOpen ? 'flex' : 'none';
     }
     if (ui.launcher) {
         ui.launcher.classList.toggle('hidden', runtime.panelOpen);
+        ui.launcher.style.display = runtime.panelOpen ? 'none' : 'flex';
     }
     if (!runtime.panelOpen) {
         setSyncSheetOpen(false);
