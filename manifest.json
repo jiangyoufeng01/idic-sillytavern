@@ -1,0 +1,11 @@
+{
+  "display_name": "IDIC Companion",
+  "version": "0.2.0",
+  "author": "OpenAI Codex",
+  "loading_order": 20,
+  "auto_update": true,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css"
+}

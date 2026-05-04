@@ -1,0 +1,319 @@
+.idic-companion-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.idic-companion-settings-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.idic-companion-settings-field textarea,
+.idic-companion-settings-field input {
+    width: 100%;
+}
+
+.idic-companion-settings-field select {
+    width: 100%;
+}
+
+.idic-companion-settings-check {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+}
+
+.idic-companion-settings-check input {
+    width: auto;
+}
+
+.idic-companion-settings-actions {
+    display: flex;
+    justify-content: flex-start;
+    margin: 8px 0 4px;
+}
+
+.idic-companion-settings-note {
+    margin: 6px 0 0;
+    opacity: 0.75;
+    font-size: 0.9em;
+}
+
+#idic-companion-launcher {
+    position: fixed;
+    right: 18px;
+    bottom: 96px;
+    z-index: 2800;
+    border-radius: 999px;
+    padding: 10px 14px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.24);
+}
+
+#idic-companion-panel {
+    position: fixed;
+    top: 72px;
+    right: 18px;
+    width: min(420px, calc(100vw - 32px));
+    height: min(82vh, 900px);
+    z-index: 2799;
+    display: flex;
+    flex-direction: column;
+    border-radius: 18px;
+    background: var(--SmartThemeBlurTintColor, rgba(24, 24, 28, 0.95));
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+    overflow: hidden;
+    backdrop-filter: blur(16px);
+}
+
+#idic-companion-panel.hidden {
+    display: none;
+}
+
+.idic-companion__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 12px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.idic-companion__title {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.idic-companion__subtitle {
+    opacity: 0.7;
+    font-size: 0.84em;
+}
+
+.idic-companion__header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.idic-companion__body {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.idic-companion__scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 12px 14px 0;
+}
+
+.idic-companion__section {
+    margin-bottom: 12px;
+    padding: 12px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.idic-companion__section h4 {
+    margin: 0 0 10px;
+    font-size: 0.98em;
+}
+
+.idic-companion__bind-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.idic-companion__bind-grid label,
+.idic-companion__bind-column label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 0.92em;
+}
+
+.idic-companion__bind-column {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.idic-companion__bind-grid label.full {
+    grid-column: 1 / -1;
+}
+
+.idic-companion__bind-actions,
+.idic-companion__turn-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+}
+
+.idic-companion__note {
+    margin-top: 10px;
+    opacity: 0.72;
+    font-size: 0.84em;
+    line-height: 1.4;
+}
+
+.idic-companion__chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.idic-companion__chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+    padding: 4px 10px;
+    background: rgba(255, 255, 255, 0.07);
+    font-size: 0.82em;
+}
+
+.idic-companion__chip.fast {
+    background: rgba(244, 153, 63, 0.18);
+}
+
+.idic-companion__chip.long {
+    background: rgba(88, 194, 117, 0.18);
+}
+
+.idic-companion__modules {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.idic-companion__module {
+    padding: 10px;
+    border-radius: 12px;
+    background: rgba(0, 0, 0, 0.16);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.idic-companion__module-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.idic-companion__module-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+}
+
+.idic-companion__module-preview {
+    margin: 0;
+    opacity: 0.85;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.9em;
+    line-height: 1.42;
+}
+
+.idic-companion__transcript {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.idic-companion__bubble {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-width: 92%;
+    padding: 10px 12px;
+    border-radius: 14px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.45;
+}
+
+.idic-companion__bubble.user {
+    align-self: flex-end;
+    background: rgba(110, 186, 255, 0.22);
+}
+
+.idic-companion__bubble.assistant {
+    align-self: flex-start;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.idic-companion__bubble.system {
+    align-self: center;
+    max-width: 100%;
+    background: rgba(255, 200, 107, 0.14);
+    font-size: 0.88em;
+}
+
+.idic-companion__bubble-meta {
+    opacity: 0.68;
+    font-size: 0.78em;
+}
+
+.idic-companion__composer {
+    padding: 12px 14px 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.idic-companion__composer textarea {
+    width: 100%;
+    min-height: 84px;
+    resize: vertical;
+}
+
+.idic-companion__composer-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.idic-companion__status {
+    opacity: 0.75;
+    font-size: 0.84em;
+}
+
+.idic-companion__empty {
+    opacity: 0.74;
+    font-size: 0.9em;
+}
+
+@media (max-width: 900px) {
+    .idic-companion-settings-grid,
+    .idic-companion__bind-grid {
+        grid-template-columns: 1fr;
+    }
+
+    #idic-companion-panel {
+        top: 58px;
+        right: 8px;
+        width: calc(100vw - 16px);
+        height: calc(100vh - 74px);
+    }
+
+    #idic-companion-launcher {
+        right: 8px;
+        bottom: 84px;
+    }
+}
