@@ -6,6 +6,10 @@ const TRANSCRIPT_STORAGE_HARD_CAP = 400;
 const COMPANION_RECENT_CHAT_LIMIT = 50;
 const MODULE_SYNC_MODES = ['content', 'summary', 'fast', 'ignore'];
 const DISCARD_TAGS = Object.freeze(['thinking', 'thought', 'reasoning', 'cot', 'analysis', 'chain-of-thought', 'tool', 'script']);
+const CHAT_SYNC_DEFER_MS = 2200;
+const CHAT_SYNC_SCAN_WINDOW_TURNS = 2;
+const STORED_TURN_TEXT_LIMIT = 18000;
+const MODULE_SCAN_CHAR_LIMIT = 24000;
 const DEFAULT_STATUS_SELECTORS = [
     '.mes_status',
     '.mes-status',
@@ -176,9 +180,9 @@ async function initializeWhenContextReady() {
         await waitForSillyTavern();
         ensureSettings();
         bindContextEvents();
-        await loadCurrentChatState();
+        await loadCurrentChatState({ skipChatSync: true });
         renderAll();
-        scheduleBackgroundMaintenance();
+        scheduleDeferredChatSync({ captureLatestStatus: false, forceLatestRescan: false });
         void fetchRoleOptions({ force: true, announce: false }).catch(() => undefined);
     } catch (error) {
         console.warn(`[${MODULE_NAME}] context not ready yet`, error);
@@ -405,15 +409,15 @@ function normalizeTurnEntry(value, fallbackTurnId = '') {
         sourceHash: toTrimmedString(source.sourceHash),
         userKey: toTrimmedString(source.userKey),
         aiKey: toTrimmedString(source.aiKey),
-        userText: String(source.userText == null ? '' : source.userText),
-        aiText: String(source.aiText == null ? '' : source.aiText),
+        userText: clipText(source.userText, STORED_TURN_TEXT_LIMIT),
+        aiText: clipText(source.aiText, STORED_TURN_TEXT_LIMIT),
         aiName: toTrimmedString(source.aiName),
         userIndex: Number.isFinite(Number(source.userIndex)) ? Number(source.userIndex) : -1,
         aiIndex: Number.isFinite(Number(source.aiIndex)) ? Number(source.aiIndex) : -1,
         createdAt: Number.isFinite(Number(source.createdAt)) ? Number(source.createdAt) : Date.now(),
         updatedAt: Number.isFinite(Number(source.updatedAt)) ? Number(source.updatedAt) : Date.now(),
         modules: Array.isArray(source.modules) ? source.modules.map(normalizeModule).filter(Boolean) : [],
-        summary: String(source.summary == null ? '' : source.summary),
+        summary: clipText(source.summary, MODULE_SCAN_CHAR_LIMIT),
         summaryTitle: toTrimmedString(source.summaryTitle),
         summaryStatus: ['ready', 'running', 'stale', 'error', 'empty', 'missing'].includes(String(source.summaryStatus))
             ? String(source.summaryStatus)
@@ -429,7 +433,7 @@ function normalizeTurnEntry(value, fallbackTurnId = '') {
 function normalizeModule(value) {
     const source = value && typeof value === 'object' ? value : null;
     if (!source) return null;
-    const text = String(source.text == null ? '' : source.text).trim();
+    const text = clipText(source.text, MODULE_SCAN_CHAR_LIMIT);
     if (!text) return null;
     const syncMode = normalizeModuleSyncMode(source);
     return {
@@ -462,7 +466,7 @@ function normalizeModuleSyncMode(source) {
 function normalizeStageSummary(value) {
     const source = value && typeof value === 'object' ? value : null;
     if (!source) return null;
-    const summary = String(source.summary == null ? '' : source.summary).trim();
+    const summary = clipText(source.summary, MODULE_SCAN_CHAR_LIMIT);
     if (!summary) return null;
     return {
         id: toTrimmedString(source.id) || createId(),
@@ -476,7 +480,7 @@ function normalizeStageSummary(value) {
 function normalizeTranscriptEntry(value) {
     const source = value && typeof value === 'object' ? value : null;
     if (!source) return null;
-    const text = String(source.text == null ? '' : source.text).trim();
+    const text = clipText(source.text, STORED_TURN_TEXT_LIMIT);
     if (!text) return null;
     return {
         id: toTrimmedString(source.id) || createId(),
@@ -1317,7 +1321,9 @@ function bindContextEvents() {
     };
 
     const resync = async (options = {}) => {
-        await loadCurrentChatState({ syncOptions: options });
+        await loadCurrentChatState({ skipChatSync: true });
+        await delay(CHAT_SYNC_DEFER_MS);
+        await syncStateFromChat(options);
         renderAll();
         scheduleBackgroundMaintenance();
     };
@@ -1333,6 +1339,22 @@ function bindContextEvents() {
     if (events.MESSAGE_EDITED) source.on(events.MESSAGE_EDITED, () => void queueChatSync(() => resync({ captureLatestStatus: false, forceLatestRescan: false }), 'message edited'));
     if (events.MESSAGE_DELETED) source.on(events.MESSAGE_DELETED, () => void queueChatSync(() => resync({ captureLatestStatus: false, forceLatestRescan: false }), 'message deleted'));
     if (events.MESSAGE_SWIPED) source.on(events.MESSAGE_SWIPED, () => void queueChatSync(() => resync({ captureLatestStatus: false, forceLatestRescan: false }), 'message swiped'));
+}
+
+function scheduleDeferredChatSync(options = {}) {
+    runtime.chatSyncQueue = runtime.chatSyncQueue
+        .catch(() => undefined)
+        .then(async () => {
+            await delay(CHAT_SYNC_DEFER_MS);
+            await syncStateFromChat(options);
+            renderAll();
+            scheduleBackgroundMaintenance();
+        })
+        .catch((error) => {
+            console.error(`[${MODULE_NAME}] deferred chat sync failed`, error);
+            setStatus('陪读窗同步失败，本次已跳过', 'error');
+        });
+    return runtime.chatSyncQueue;
 }
 
 function bindFloatingDrag() {
@@ -1713,9 +1735,16 @@ async function syncStateFromChat(options = {}) {
     let stateChanged = false;
     let rollupInvalidated = false;
     let latestTurnId = '';
+    const settings = ensureSettings();
+    const scanWindow = Math.max(CHAT_SYNC_SCAN_WINDOW_TURNS, clampNumber(settings.recentFullTurns, 1, 6, CHAT_SYNC_SCAN_WINDOW_TURNS));
 
-    candidates.forEach((candidate, index) => {
+    for (let index = 0; index < candidates.length; index += 1) {
+        if (index > 0 && index % 6 === 0) {
+            await delay(0);
+        }
+        const candidate = candidates[index];
         const isLatest = index === candidates.length - 1;
+        const shouldScanModules = index >= Math.max(0, candidates.length - scanWindow);
         const existing = runtime.chatState.turns[candidate.turnId];
         if (existing && existing.sourceHash !== candidate.sourceHash) {
             rollupInvalidated = true;
@@ -1730,12 +1759,13 @@ async function syncStateFromChat(options = {}) {
             newTurns[candidate.turnId] = normalizeTurnEntry(existing, candidate.turnId);
             newOrder.push(candidate.turnId);
             latestTurnId = candidate.turnId;
-            return;
+            continue;
         }
         const nextEntry = materializeTurnEntry(existing, candidate, {
             statusText: persistentStatusText,
             forceRescan,
             isLatest,
+            scanModules: shouldScanModules,
         });
         if (!existing || existing.sourceHash !== candidate.sourceHash || forceRescan) {
             stateChanged = true;
@@ -1743,7 +1773,7 @@ async function syncStateFromChat(options = {}) {
         newTurns[candidate.turnId] = nextEntry;
         newOrder.push(candidate.turnId);
         latestTurnId = candidate.turnId;
-    });
+    }
 
     const oldOrder = Array.isArray(runtime.chatState.turnOrder) ? runtime.chatState.turnOrder.slice() : [];
     const appendOnly = oldOrder.every((turnId, index) => newOrder[index] === turnId) && newOrder.length >= oldOrder.length;
@@ -1776,12 +1806,14 @@ function buildTurnCandidates(chat) {
             return;
         }
         if (!pendingUser) return;
-        const userText = getMessageText(pendingUser.message);
-        const aiText = getMessageText(message);
-        if (!userText && !aiText) {
+        const rawUserText = getMessageText(pendingUser.message);
+        const rawAiText = getMessageText(message);
+        if (!rawUserText && !rawAiText) {
             pendingUser = null;
             return;
         }
+        const userText = clipText(rawUserText, STORED_TURN_TEXT_LIMIT);
+        const aiText = clipText(rawAiText, STORED_TURN_TEXT_LIMIT);
         const userKey = resolveMessageKey(pendingUser.message, pendingUser.index, 'user');
         const aiKey = resolveMessageKey(message, index, 'assistant');
         const turnId = `${userKey}__${aiKey}`;
@@ -1808,7 +1840,9 @@ function materializeTurnEntry(existing, candidate, options = {}) {
         || Boolean(options.forceRescan);
     const statusText = toTrimmedString(options.statusText || '');
     const scannedModules = shouldRescan
-        ? scanAiModules(candidate.aiText, { statusText })
+        ? (options.scanModules === false
+            ? buildFallbackModules(candidate.aiText, { statusText, lightweight: true })
+            : scanAiModules(candidate.aiText, { statusText }))
         : (Array.isArray(previous.modules) ? previous.modules.slice() : []);
     const modules = mergeModuleSelections(previous, scannedModules);
     const persistentDigest = computePersistentDigest(candidate.userText, modules);
@@ -2469,7 +2503,7 @@ function resolveMessageKey(message, index, role) {
         || extra?.gen_id
         || extra?.display_id
         || message?.send_date
-        || `${role}_${index}_${hashText(getMessageText(message)).slice(0, 10)}`
+        || `${role}_${index}_${hashText(clipText(getMessageText(message), STORED_TURN_TEXT_LIMIT)).slice(0, 10)}`
     );
 }
 
@@ -2673,9 +2707,25 @@ function flattenCompanionTagTree(blocks, bucket = []) {
     return bucket;
 }
 
+function cleanupLightweightText(value) {
+    let cleaned = String(value == null ? '' : value);
+    cleaned = cleaned.replace(CODE_BLOCK_REGEX, ' ');
+    cleaned = cleaned.replace(/<script[\s\S]*?<\/script>/gi, ' ');
+    cleaned = cleaned.replace(/<style[\s\S]*?<\/style>/gi, ' ');
+    cleaned = cleaned.replace(/<\/?[^>]+>/g, ' ');
+    cleaned = cleaned.replace(/`([^`]+)`/g, '$1');
+    return cleaned
+        .replace(/\r/g, '\n')
+        .split('\n')
+        .map((line) => line.replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .join('\n')
+        .trim();
+}
+
 function buildFallbackModules(aiText, options = {}) {
     const modules = [];
-    const fallback = cleanupModuleText(aiText);
+    const fallback = cleanupLightweightText(aiText);
     if (fallback) {
         modules.push(createModule('plain_text_fallback', 'plain_text', '无标签文本', fallback, {
             sourceType: 'plain_text',
@@ -2699,6 +2749,9 @@ function buildFallbackModules(aiText, options = {}) {
 function scanAiModules(aiText, options = {}) {
     try {
         const source = String(aiText == null ? '' : aiText);
+        if (options.lightweight || source.length > MODULE_SCAN_CHAR_LIMIT) {
+            return buildFallbackModules(clipText(source, MODULE_SCAN_CHAR_LIMIT), options);
+        }
         const modules = [];
         let withoutCode = source.replace(CODE_BLOCK_REGEX, (_, lang, code) => {
         const cleanLang = toTrimmedString(lang).toLowerCase();
