@@ -8,6 +8,7 @@ const MODULE_SYNC_MODES = ['content', 'summary', 'fast', 'ignore'];
 const DISCARD_TAGS = Object.freeze(['thinking', 'thought', 'reasoning', 'cot', 'analysis', 'chain-of-thought', 'tool', 'script']);
 const CHAT_SYNC_DEFER_MS = 2200;
 const CHAT_SYNC_SCAN_WINDOW_TURNS = 2;
+const RECENT_STATE_CACHE_TURNS = 12;
 const STORED_TURN_TEXT_LIMIT = 18000;
 const MODULE_SCAN_CHAR_LIMIT = 24000;
 const DEFAULT_STATUS_SELECTORS = [
@@ -1338,12 +1339,13 @@ function runManualChatSync(options = {}) {
         .catch(() => undefined)
         .then(async () => {
             setStatus('正在同步最近楼层...', 'info');
+            const settings = ensureSettings();
             await syncStateFromChat(Object.assign({
                 captureLatestStatus: true,
                 forceLatestRescan: true,
+                maxRecentTurns: settings.recentFullTurns,
             }, options));
             renderAll();
-            scheduleBackgroundMaintenance();
             setStatus('最近楼层已同步', 'success');
         })
         .catch((error) => {
@@ -1724,9 +1726,18 @@ async function syncStateFromChat(options = {}) {
 
     const captureLatestStatus = Boolean(options.captureLatestStatus);
     const forceLatestRescan = Boolean(options.forceLatestRescan);
-    const candidates = buildTurnCandidates(context.chat);
+    const recentLimit = clampNumber(options.maxRecentTurns, 0, 6, 0);
+    const candidates = recentLimit > 0
+        ? buildRecentTurnCandidates(context.chat, recentLimit)
+        : buildTurnCandidates(context.chat);
+    const preservedOrder = recentLimit > 0 && Array.isArray(runtime.chatState.turnOrder)
+        ? runtime.chatState.turnOrder.slice(-RECENT_STATE_CACHE_TURNS).filter((turnId) => runtime.chatState.turns[turnId])
+        : [];
     const newTurns = {};
-    const newOrder = [];
+    preservedOrder.forEach((turnId) => {
+        newTurns[turnId] = runtime.chatState.turns[turnId];
+    });
+    const newOrder = recentLimit > 0 ? preservedOrder.slice() : [];
     let stateChanged = false;
     let rollupInvalidated = false;
     let latestTurnId = '';
@@ -1766,13 +1777,15 @@ async function syncStateFromChat(options = {}) {
             stateChanged = true;
         }
         newTurns[candidate.turnId] = nextEntry;
+        const existingOrderIndex = newOrder.indexOf(candidate.turnId);
+        if (existingOrderIndex >= 0) newOrder.splice(existingOrderIndex, 1);
         newOrder.push(candidate.turnId);
         latestTurnId = candidate.turnId;
     }
 
     const oldOrder = Array.isArray(runtime.chatState.turnOrder) ? runtime.chatState.turnOrder.slice() : [];
     const appendOnly = oldOrder.every((turnId, index) => newOrder[index] === turnId) && newOrder.length >= oldOrder.length;
-    if ((!appendOnly && oldOrder.length > 0) || rollupInvalidated) {
+    if (recentLimit === 0 && ((!appendOnly && oldOrder.length > 0) || rollupInvalidated)) {
         stateChanged = true;
         runtime.chatState.stageSummaries = [];
         Object.values(newTurns).forEach((turn) => {
@@ -1801,31 +1814,52 @@ function buildTurnCandidates(chat) {
             return;
         }
         if (!pendingUser) return;
-        const rawUserText = getMessageText(pendingUser.message);
-        const rawAiText = getMessageText(message);
-        if (!rawUserText && !rawAiText) {
-            pendingUser = null;
-            return;
-        }
-        const userText = clipText(rawUserText, STORED_TURN_TEXT_LIMIT);
-        const aiText = clipText(rawAiText, STORED_TURN_TEXT_LIMIT);
-        const userKey = resolveMessageKey(pendingUser.message, pendingUser.index, 'user');
-        const aiKey = resolveMessageKey(message, index, 'assistant');
-        const turnId = `${userKey}__${aiKey}`;
-        turns.push({
-            turnId,
-            userKey,
-            aiKey,
-            userIndex: pendingUser.index,
-            aiIndex: index,
-            userText,
-            aiText,
-            aiName: toTrimmedString(message.name) || '角色',
-            sourceHash: hashText(`${userKey}|${aiKey}|${userText}|${aiText}`),
-        });
+        const candidate = createTurnCandidate(pendingUser.message, pendingUser.index, message, index);
+        if (candidate) turns.push(candidate);
         pendingUser = null;
     });
     return turns;
+}
+
+function buildRecentTurnCandidates(chat, limit) {
+    const turns = [];
+    let pendingAssistant = null;
+    const maxTurns = clampNumber(limit, 1, 6, CHAT_SYNC_SCAN_WINDOW_TURNS);
+    for (let index = chat.length - 1; index >= 0 && turns.length < maxTurns; index -= 1) {
+        const message = chat[index];
+        if (!message || message.is_system) continue;
+        if (!message.is_user) {
+            if (!pendingAssistant) pendingAssistant = { message, index };
+            continue;
+        }
+        if (!pendingAssistant) continue;
+        const candidate = createTurnCandidate(message, index, pendingAssistant.message, pendingAssistant.index);
+        if (candidate) turns.push(candidate);
+        pendingAssistant = null;
+    }
+    return turns.reverse();
+}
+
+function createTurnCandidate(userMessage, userIndex, aiMessage, aiIndex) {
+    const rawUserText = getMessageText(userMessage);
+    const rawAiText = getMessageText(aiMessage);
+    if (!rawUserText && !rawAiText) return null;
+    const userText = clipText(rawUserText, STORED_TURN_TEXT_LIMIT);
+    const aiText = clipText(rawAiText, STORED_TURN_TEXT_LIMIT);
+    const userKey = resolveMessageKey(userMessage, userIndex, 'user');
+    const aiKey = resolveMessageKey(aiMessage, aiIndex, 'assistant');
+    const turnId = `${userKey}__${aiKey}`;
+    return {
+        turnId,
+        userKey,
+        aiKey,
+        userIndex,
+        aiIndex,
+        userText,
+        aiText,
+        aiName: toTrimmedString(aiMessage?.name) || '角色',
+        sourceHash: hashText(`${userKey}|${aiKey}|${userText}|${aiText}`),
+    };
 }
 
 function materializeTurnEntry(existing, candidate, options = {}) {
@@ -3237,7 +3271,11 @@ async function sendCompanionMessage() {
 
     runtime.sendInFlight = true;
     setStatus('正在整理上下文...', 'info');
-    await syncStateFromChat({ captureLatestStatus: true, forceLatestRescan: false });
+    await syncStateFromChat({
+        captureLatestStatus: true,
+        forceLatestRescan: false,
+        maxRecentTurns: ensureSettings().recentFullTurns,
+    });
     await scheduleImmediateContextHydration();
 
     const userBatchId = createId();
@@ -3372,7 +3410,11 @@ async function sendBridgeReply(options) {
     }
 
     runtime.sendInFlight = true;
-    await syncStateFromChat({ captureLatestStatus: true, forceLatestRescan: false });
+    await syncStateFromChat({
+        captureLatestStatus: true,
+        forceLatestRescan: false,
+        maxRecentTurns: ensureSettings().recentFullTurns,
+    });
     await scheduleImmediateContextHydration();
 
     const pendingBatchId = createId();
