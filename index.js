@@ -45,6 +45,9 @@ const runtime = {
     chatState: null,
     panelOpen: false,
     settingsRoot: null,
+    settingsObserver: null,
+    settingsMountTimer: null,
+    settingsBindingsAttached: false,
     activeStateKey: '',
     backgroundQueue: Promise.resolve(),
     latestTurnId: '',
@@ -184,19 +187,23 @@ function getSettingsContainer() {
     return document.querySelector('#extensions_settings2') || document.querySelector('#extensions_settings');
 }
 
-async function waitForSettingsContainer() {
-    const startedAt = Date.now();
-    while (!getSettingsContainer()) {
-        if (Date.now() - startedAt > 30_000) {
-            return null;
-        }
-        await delay(150);
+function watchSettingsContainer() {
+    if (document.body && !runtime.settingsObserver && typeof MutationObserver === 'function') {
+        runtime.settingsObserver = new MutationObserver(() => {
+            void mountSettings();
+        });
+        runtime.settingsObserver.observe(document.body, { childList: true, subtree: true });
     }
-    return getSettingsContainer();
+
+    if (!runtime.settingsMountTimer && typeof window.setInterval === 'function') {
+        runtime.settingsMountTimer = window.setInterval(() => {
+            void mountSettings();
+        }, 1500);
+    }
 }
 
 async function mountSettingsWhenReady() {
-    await waitForSettingsContainer();
+    watchSettingsContainer();
     await mountSettings();
 }
 
@@ -486,35 +493,36 @@ async function persistChatState() {
     await localforage.setItem(runtime.activeStateKey, runtime.chatState);
 }
 
-async function mountSettings() {
-    const container = document.querySelector('#extensions_settings2') || document.querySelector('#extensions_settings');
-    if (!container) return;
-    const html = getFallbackSettingsMarkup();
-    const root = document.createElement('div');
-    root.innerHTML = html;
-    runtime.settingsRoot = root.firstElementChild;
-    if (!runtime.settingsRoot || !runtime.settingsRoot.querySelector('#idic-companion-open-panel')) {
-        root.innerHTML = getFallbackSettingsMarkup();
-        runtime.settingsRoot = root.firstElementChild;
+function ensureSettingsRoot() {
+    if (runtime.settingsRoot?.querySelector?.('#idic-companion-open-panel')) {
+        return runtime.settingsRoot;
     }
-    if (!runtime.settingsRoot) return;
-    container.appendChild(runtime.settingsRoot);
 
-    ui.bridgeUrlInput = runtime.settingsRoot.querySelector('#idic-companion-bridge-url');
-    ui.bridgeTokenInput = runtime.settingsRoot.querySelector('#idic-companion-bridge-token');
-    ui.bridgeAuthKeyInput = runtime.settingsRoot.querySelector('#idic-companion-bridge-auth-key');
-    ui.apiUrlInput = runtime.settingsRoot.querySelector('#idic-companion-api-url');
-    ui.apiKeyInput = runtime.settingsRoot.querySelector('#idic-companion-api-key');
-    ui.apiModelInput = runtime.settingsRoot.querySelector('#idic-companion-api-model');
-    ui.apiTemperatureInput = runtime.settingsRoot.querySelector('#idic-companion-api-temperature');
-    ui.recentFullTurnsInput = runtime.settingsRoot.querySelector('#idic-companion-recent-full-turns');
-    ui.rollupSizeInput = runtime.settingsRoot.querySelector('#idic-companion-rollup-size');
-    ui.maxTurnCharsInput = runtime.settingsRoot.querySelector('#idic-companion-max-turn-chars');
-    ui.maxTranscriptTurnsInput = runtime.settingsRoot.querySelector('#idic-companion-max-transcript-turns');
-    ui.statusSelectorsInput = runtime.settingsRoot.querySelector('#idic-companion-status-selectors');
-    ui.autoSummaryToggle = runtime.settingsRoot.querySelector('#idic-companion-auto-summary-toggle');
-    ui.openPanelButton = runtime.settingsRoot.querySelector('#idic-companion-open-panel');
+    const root = document.createElement('div');
+    root.innerHTML = getFallbackSettingsMarkup();
+    runtime.settingsRoot = root.firstElementChild;
+    runtime.settingsBindingsAttached = false;
+    return runtime.settingsRoot || null;
+}
 
+function cacheSettingsUi(root) {
+    ui.bridgeUrlInput = root.querySelector('#idic-companion-bridge-url');
+    ui.bridgeTokenInput = root.querySelector('#idic-companion-bridge-token');
+    ui.bridgeAuthKeyInput = root.querySelector('#idic-companion-bridge-auth-key');
+    ui.apiUrlInput = root.querySelector('#idic-companion-api-url');
+    ui.apiKeyInput = root.querySelector('#idic-companion-api-key');
+    ui.apiModelInput = root.querySelector('#idic-companion-api-model');
+    ui.apiTemperatureInput = root.querySelector('#idic-companion-api-temperature');
+    ui.recentFullTurnsInput = root.querySelector('#idic-companion-recent-full-turns');
+    ui.rollupSizeInput = root.querySelector('#idic-companion-rollup-size');
+    ui.maxTurnCharsInput = root.querySelector('#idic-companion-max-turn-chars');
+    ui.maxTranscriptTurnsInput = root.querySelector('#idic-companion-max-transcript-turns');
+    ui.statusSelectorsInput = root.querySelector('#idic-companion-status-selectors');
+    ui.autoSummaryToggle = root.querySelector('#idic-companion-auto-summary-toggle');
+    ui.openPanelButton = root.querySelector('#idic-companion-open-panel');
+}
+
+function hydrateSettingsUi() {
     const settings = ensureSettings();
     if (ui.bridgeUrlInput) ui.bridgeUrlInput.value = settings.bridgeUrl;
     if (ui.bridgeTokenInput) ui.bridgeTokenInput.value = settings.bridgeToken;
@@ -529,6 +537,10 @@ async function mountSettings() {
     if (ui.maxTranscriptTurnsInput) ui.maxTranscriptTurnsInput.value = String(settings.maxTranscriptTurns);
     if (ui.statusSelectorsInput) ui.statusSelectorsInput.value = settings.statusSelectors;
     if (ui.autoSummaryToggle) ui.autoSummaryToggle.checked = settings.autoGenerateSummaryWhenMissing;
+}
+
+function bindSettingsUi() {
+    if (runtime.settingsBindingsAttached) return;
 
     const bindSetting = (element, key, transform) => {
         if (!element) return;
@@ -577,6 +589,22 @@ async function mountSettings() {
     ui.openPanelButton?.addEventListener('click', () => {
         setPanelOpen(true);
     });
+
+    runtime.settingsBindingsAttached = true;
+}
+
+async function mountSettings() {
+    const container = getSettingsContainer();
+    if (!container) return false;
+    const settingsRoot = ensureSettingsRoot();
+    if (!settingsRoot) return false;
+    cacheSettingsUi(settingsRoot);
+    bindSettingsUi();
+    hydrateSettingsUi();
+    if (settingsRoot.parentElement !== container) {
+        container.appendChild(settingsRoot);
+    }
+    return true;
 }
 
 function mountPanel() {
