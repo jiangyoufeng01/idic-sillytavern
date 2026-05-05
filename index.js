@@ -11,6 +11,7 @@ const CHAT_SYNC_SCAN_WINDOW_TURNS = 2;
 const RECENT_STATE_CACHE_TURNS = 12;
 const STORED_TURN_TEXT_LIMIT = 18000;
 const MODULE_SCAN_CHAR_LIMIT = 24000;
+const SYNC_PREVIEW_TEXT_LIMIT = 2800;
 const DEFAULT_STATUS_SELECTORS = [
     '.mes_status',
     '.mes-status',
@@ -744,9 +745,9 @@ function mountPanel() {
             setStatus('角色已切换', 'success');
         }
     });
-    ui.openSyncSheetButton?.addEventListener('click', async () => {
-        await runManualChatSync();
+    ui.openSyncSheetButton?.addEventListener('click', () => {
         setSyncSheetOpen(true);
+        void runManualChatSync();
     });
     ui.closeSyncSheetButton?.addEventListener('click', () => setSyncSheetOpen(false));
     ui.syncSheetMask?.addEventListener('click', () => setSyncSheetOpen(false));
@@ -1338,19 +1339,24 @@ function runManualChatSync(options = {}) {
     runtime.chatSyncQueue = runtime.chatSyncQueue
         .catch(() => undefined)
         .then(async () => {
+            if (ui.openSyncSheetButton) ui.openSyncSheetButton.disabled = true;
             setStatus('正在同步最近楼层...', 'info');
-            const settings = ensureSettings();
             await syncStateFromChat(Object.assign({
-                captureLatestStatus: true,
+                captureLatestStatus: false,
                 forceLatestRescan: true,
-                maxRecentTurns: settings.recentFullTurns,
+                lightweight: true,
+                maxRecentTurns: 1,
             }, options));
-            renderAll();
+            renderContextStats();
+            renderLatestModules();
             setStatus('最近楼层已同步', 'success');
         })
         .catch((error) => {
             console.error(`[${MODULE_NAME}] manual chat sync failed`, error);
             setStatus('陪读窗同步失败，本次已跳过', 'error');
+        })
+        .finally(() => {
+            if (ui.openSyncSheetButton) ui.openSyncSheetButton.disabled = false;
         });
     return runtime.chatSyncQueue;
 }
@@ -1755,7 +1761,7 @@ async function syncStateFromChat(options = {}) {
         if (existing && existing.sourceHash !== candidate.sourceHash) {
             rollupInvalidated = true;
         }
-        const persistentStatusText = isLatest && captureLatestStatus
+        const persistentStatusText = !options.lightweight && isLatest && captureLatestStatus
             ? readStatusBarText()
             : readSavedStatusText(existing);
         const previousStatusText = readSavedStatusText(existing);
@@ -1771,7 +1777,8 @@ async function syncStateFromChat(options = {}) {
             statusText: persistentStatusText,
             forceRescan,
             isLatest,
-            scanModules: shouldScanModules,
+            scanModules: options.lightweight ? false : shouldScanModules,
+            lightweight: Boolean(options.lightweight),
         });
         if (!existing || existing.sourceHash !== candidate.sourceHash || forceRescan) {
             stateChanged = true;
@@ -1870,7 +1877,7 @@ function materializeTurnEntry(existing, candidate, options = {}) {
     const statusText = toTrimmedString(options.statusText || '');
     const scannedModules = shouldRescan
         ? (options.scanModules === false
-            ? buildFallbackModules(candidate.aiText, { statusText, lightweight: true })
+            ? buildFallbackModules(candidate.aiText, { statusText, lightweight: options.lightweight !== false })
             : scanAiModules(candidate.aiText, { statusText }))
         : (Array.isArray(previous.modules) ? previous.modules.slice() : []);
     const modules = mergeModuleSelections(previous, scannedModules);
@@ -2754,7 +2761,9 @@ function cleanupLightweightText(value) {
 
 function buildFallbackModules(aiText, options = {}) {
     const modules = [];
-    const fallback = cleanupLightweightText(aiText);
+    const fallback = options.lightweight
+        ? clipText(cleanupLightweightText(aiText), SYNC_PREVIEW_TEXT_LIMIT)
+        : cleanupLightweightText(aiText);
     if (fallback) {
         modules.push(createModule('plain_text_fallback', 'plain_text', '无标签文本', fallback, {
             sourceType: 'plain_text',
@@ -2885,7 +2894,7 @@ function renderLatestModules() {
                         >${escapeHtml(getModuleSyncModeLabel(value))}</button>
                     `).join('')}
                 </div>
-                <pre class="idic-companion__module-preview">${escapeHtml(module.text)}</pre>
+                <pre class="idic-companion__module-preview">${escapeHtml(clipText(module.text, SYNC_PREVIEW_TEXT_LIMIT))}</pre>
             </div>
         `;
     }).join('');
