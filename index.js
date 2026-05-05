@@ -182,7 +182,6 @@ async function initializeWhenContextReady() {
         bindContextEvents();
         await loadCurrentChatState({ skipChatSync: true });
         renderAll();
-        scheduleDeferredChatSync({ captureLatestStatus: false, forceLatestRescan: false });
         void fetchRoleOptions({ force: true, announce: false }).catch(() => undefined);
     } catch (error) {
         console.warn(`[${MODULE_NAME}] context not ready yet`, error);
@@ -744,7 +743,10 @@ function mountPanel() {
             setStatus('角色已切换', 'success');
         }
     });
-    ui.openSyncSheetButton?.addEventListener('click', () => setSyncSheetOpen(true));
+    ui.openSyncSheetButton?.addEventListener('click', async () => {
+        await runManualChatSync();
+        setSyncSheetOpen(true);
+    });
     ui.closeSyncSheetButton?.addEventListener('click', () => setSyncSheetOpen(false));
     ui.syncSheetMask?.addEventListener('click', () => setSyncSheetOpen(false));
     ui.selectDeleteButton?.addEventListener('click', () => {
@@ -1320,38 +1322,32 @@ function bindContextEvents() {
         return runtime.chatSyncQueue;
     };
 
-    const resync = async (options = {}) => {
+    const resyncMetadataOnly = async () => {
         await loadCurrentChatState({ skipChatSync: true });
-        await delay(CHAT_SYNC_DEFER_MS);
-        await syncStateFromChat(options);
         renderAll();
-        scheduleBackgroundMaintenance();
     };
 
-    const messageHandler = async () => {
-        await syncStateFromChat({ captureLatestStatus: true, forceLatestRescan: false });
-        renderAll();
-        scheduleBackgroundMaintenance();
-    };
-
-    if (events.CHAT_CHANGED) source.on(events.CHAT_CHANGED, () => void queueChatSync(() => resync({ captureLatestStatus: false, forceLatestRescan: false }), 'chat changed'));
-    if (events.MESSAGE_RECEIVED) source.on(events.MESSAGE_RECEIVED, () => void queueChatSync(() => messageHandler(), 'message received'));
-    if (events.MESSAGE_EDITED) source.on(events.MESSAGE_EDITED, () => void queueChatSync(() => resync({ captureLatestStatus: false, forceLatestRescan: false }), 'message edited'));
-    if (events.MESSAGE_DELETED) source.on(events.MESSAGE_DELETED, () => void queueChatSync(() => resync({ captureLatestStatus: false, forceLatestRescan: false }), 'message deleted'));
-    if (events.MESSAGE_SWIPED) source.on(events.MESSAGE_SWIPED, () => void queueChatSync(() => resync({ captureLatestStatus: false, forceLatestRescan: false }), 'message swiped'));
+    if (events.CHAT_CHANGED) source.on(events.CHAT_CHANGED, () => void queueChatSync(() => resyncMetadataOnly(), 'chat changed'));
+    if (events.MESSAGE_EDITED) source.on(events.MESSAGE_EDITED, () => void queueChatSync(() => resyncMetadataOnly(), 'message edited'));
+    if (events.MESSAGE_DELETED) source.on(events.MESSAGE_DELETED, () => void queueChatSync(() => resyncMetadataOnly(), 'message deleted'));
+    if (events.MESSAGE_SWIPED) source.on(events.MESSAGE_SWIPED, () => void queueChatSync(() => resyncMetadataOnly(), 'message swiped'));
 }
 
-function scheduleDeferredChatSync(options = {}) {
+function runManualChatSync(options = {}) {
     runtime.chatSyncQueue = runtime.chatSyncQueue
         .catch(() => undefined)
         .then(async () => {
-            await delay(CHAT_SYNC_DEFER_MS);
-            await syncStateFromChat(options);
+            setStatus('正在同步最近楼层...', 'info');
+            await syncStateFromChat(Object.assign({
+                captureLatestStatus: true,
+                forceLatestRescan: true,
+            }, options));
             renderAll();
             scheduleBackgroundMaintenance();
+            setStatus('最近楼层已同步', 'success');
         })
         .catch((error) => {
-            console.error(`[${MODULE_NAME}] deferred chat sync failed`, error);
+            console.error(`[${MODULE_NAME}] manual chat sync failed`, error);
             setStatus('陪读窗同步失败，本次已跳过', 'error');
         });
     return runtime.chatSyncQueue;
@@ -1440,9 +1436,8 @@ function setPanelOpen(open) {
     }
     if (!runtime.panelOpen) {
         setSyncSheetOpen(false);
-    } else if (ui.input && !ui.input.disabled) {
+    } else {
         window.requestAnimationFrame(() => {
-            ui.input?.focus();
             if (ui.scrollRoot) ui.scrollRoot.scrollTop = ui.scrollRoot.scrollHeight;
         });
     }
@@ -1709,7 +1704,7 @@ function renderBinding() {
         ui.input.disabled = !roleName || runtime.sendInFlight;
     }
     renderComposerState(roleName);
-    if (ui.openSyncSheetButton) ui.openSyncSheetButton.disabled = !runtime.latestTurnId;
+    if (ui.openSyncSheetButton) ui.openSyncSheetButton.disabled = !roleName || runtime.sendInFlight;
 }
 
 function renderComposerState(roleName = '') {
