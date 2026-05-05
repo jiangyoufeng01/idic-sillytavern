@@ -59,7 +59,85 @@ const runtime = {
 
 const ui = {};
 
-void bootstrap();
+void bootstrap().catch((error) => {
+    console.error(`[${MODULE_NAME}] bootstrap failed`, error);
+    notify('IDIC陪读窗加载失败，请刷新页面后重试', 'error');
+});
+
+function getFallbackSettingsMarkup() {
+    return `
+        <div class="idic-companion-settings">
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b>IDIC 陪读窗</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <div class="idic-companion-settings-grid">
+                        <label class="idic-companion-settings-field">
+                            <span>中转地址</span>
+                            <input id="idic-companion-bridge-url" type="text" placeholder="https://你的项目.functions.supabase.co/idic-companion-bridge" />
+                        </label>
+                        <label class="idic-companion-settings-field">
+                            <span>中转令牌</span>
+                            <input id="idic-companion-bridge-token" type="password" placeholder="没有就留空" />
+                        </label>
+                        <label class="idic-companion-settings-field">
+                            <span>函数密钥</span>
+                            <input id="idic-companion-bridge-auth-key" type="password" placeholder="可填 publishable key，也可留空" />
+                        </label>
+                        <label class="idic-companion-settings-field">
+                            <span>主接口地址</span>
+                            <input id="idic-companion-api-url" type="text" placeholder="https://api.openai.com/v1" />
+                        </label>
+                        <label class="idic-companion-settings-field">
+                            <span>主接口密钥</span>
+                            <input id="idic-companion-api-key" type="password" placeholder="用于陪读回复" />
+                        </label>
+                        <label class="idic-companion-settings-field">
+                            <span>模型名</span>
+                            <input id="idic-companion-api-model" type="text" placeholder="跟主聊一致就行" />
+                        </label>
+                        <label class="idic-companion-settings-field">
+                            <span>温度</span>
+                            <input id="idic-companion-api-temperature" type="number" min="0" max="2" step="0.05" />
+                        </label>
+                        <label class="idic-companion-settings-field">
+                            <span>最近原文楼数</span>
+                            <input id="idic-companion-recent-full-turns" type="number" min="1" max="6" />
+                        </label>
+                        <label class="idic-companion-settings-field">
+                            <span>阶段总结楼数</span>
+                            <input id="idic-companion-rollup-size" type="number" min="5" max="60" />
+                        </label>
+                        <label class="idic-companion-settings-field">
+                            <span>单楼最大字数</span>
+                            <input id="idic-companion-max-turn-chars" type="number" min="800" max="12000" step="100" />
+                        </label>
+                        <label class="idic-companion-settings-field">
+                            <span>陪读记忆轮数</span>
+                            <input id="idic-companion-max-transcript-turns" type="number" min="4" max="40" />
+                        </label>
+                    </div>
+
+                    <label class="idic-companion-settings-field">
+                        <span>状态栏选择器</span>
+                        <textarea id="idic-companion-status-selectors" rows="5" placeholder=".status-bar&#10;[data-status-bar]&#10;.mes_status"></textarea>
+                    </label>
+
+                    <label class="idic-companion-settings-field idic-companion-settings-check">
+                        <input id="idic-companion-auto-summary-toggle" type="checkbox" />
+                        <span>没有现成摘要时自动补摘要</span>
+                    </label>
+
+                    <div class="idic-companion-settings-actions">
+                        <button id="idic-companion-open-panel" class="menu_button">打开小窗</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
 
 async function bootstrap() {
     await waitForSillyTavern();
@@ -341,13 +419,26 @@ async function persistChatState() {
 }
 
 async function mountSettings() {
-    const response = await fetch(new URL('settings.html', import.meta.url));
-    const html = await response.text();
     const container = document.querySelector('#extensions_settings2') || document.querySelector('#extensions_settings');
     if (!container) return;
+    let html = '';
+    try {
+        const response = await fetch(new URL('settings.html', import.meta.url));
+        if (!response.ok) {
+            throw new Error(`settings_html_http_${response.status}`);
+        }
+        html = await response.text();
+    } catch (error) {
+        console.warn(`[${MODULE_NAME}] settings.html load failed, using fallback markup`, error);
+        html = getFallbackSettingsMarkup();
+    }
     const root = document.createElement('div');
     root.innerHTML = html;
     runtime.settingsRoot = root.firstElementChild;
+    if (!runtime.settingsRoot || !runtime.settingsRoot.querySelector('#idic-companion-open-panel')) {
+        root.innerHTML = getFallbackSettingsMarkup();
+        runtime.settingsRoot = root.firstElementChild;
+    }
     if (!runtime.settingsRoot) return;
     container.appendChild(runtime.settingsRoot);
 
