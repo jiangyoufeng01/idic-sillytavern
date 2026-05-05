@@ -39,7 +39,6 @@ const DEFAULT_SETTINGS = Object.freeze({
     autoGenerateSummaryWhenMissing: false,
 });
 
-let importedGetContext = null;
 let fallbackSettings = {};
 
 const runtime = {
@@ -75,10 +74,6 @@ function startBootstrap(reason = 'module') {
 }
 
 void startBootstrap('module');
-
-export async function onActivate() {
-    await startBootstrap('activate');
-}
 
 function getFallbackSettingsMarkup() {
     return `
@@ -158,7 +153,6 @@ function getFallbackSettingsMarkup() {
 async function bootstrap() {
     await waitForDocumentBody();
     mountPanel();
-    void loadSillyTavernContextApi();
     void mountSettingsWhenReady();
     await initializeWhenContextReady();
 }
@@ -209,8 +203,6 @@ async function mountSettingsWhenReady() {
 async function waitForSillyTavern() {
     const startedAt = Date.now();
     while (!getContextSafe()) {
-        await loadSillyTavernContextApi();
-        if (getContextSafe()) return;
         if (Date.now() - startedAt > 30_000) {
             throw new Error('酒馆环境加载超时');
         }
@@ -226,33 +218,14 @@ function getContextSafe() {
             return null;
         }
     }
-    if (typeof importedGetContext === 'function') {
+    if (typeof window.getContext === 'function') {
         try {
-            return importedGetContext();
+            return window.getContext();
         } catch (_) {
             return null;
         }
     }
     return null;
-}
-
-async function loadSillyTavernContextApi() {
-    if (typeof importedGetContext === 'function') return;
-    const candidates = [
-        '/scripts/extensions.js',
-        '../../../extensions.js',
-    ];
-    for (const specifier of candidates) {
-        try {
-            const mod = await import(specifier);
-            if (mod && typeof mod.getContext === 'function') {
-                importedGetContext = mod.getContext;
-                return;
-            }
-        } catch (_) {
-            // SillyTavern has used both global and module-based extension helpers.
-        }
-    }
 }
 
 function getContext() {

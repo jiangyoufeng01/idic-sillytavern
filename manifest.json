@@ -1,14 +1,11 @@
 {
   "display_name": "IDIC 陪读窗",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "author": "OpenAI Codex",
   "loading_order": 20,
   "auto_update": true,
   "requires": [],
   "optional": [],
   "js": "index.js",
-  "css": "style.css",
-  "hooks": {
-    "activate": "onActivate"
-  }
+  "css": "style.css"
 }
