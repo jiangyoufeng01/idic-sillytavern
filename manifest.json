@@ -1,6 +1,6 @@
 {
   "display_name": "IDIC 陪读窗",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "author": "OpenAI Codex",
   "loading_order": 20,
   "auto_update": true,
