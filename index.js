@@ -76,7 +76,9 @@ function startBootstrap(reason = 'module') {
     return bootstrapPromise;
 }
 
-void startBootstrap('module');
+jQuery(async () => {
+    void startBootstrap('module');
+});
 
 function getFallbackSettingsMarkup() {
     return `
@@ -4313,3 +4315,5 @@ async function sendBridgeReply(options) {
         renderBinding();
     }
 }
+
+export {};
