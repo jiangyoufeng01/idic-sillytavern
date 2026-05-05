@@ -39,6 +39,8 @@ const DEFAULT_SETTINGS = Object.freeze({
     autoGenerateSummaryWhenMissing: false,
 });
 
+let importedGetContext = null;
+
 const runtime = {
     chatState: null,
     panelOpen: false,
@@ -69,7 +71,7 @@ function getFallbackSettingsMarkup() {
         <div class="idic-companion-settings">
             <div class="inline-drawer">
                 <div class="inline-drawer-toggle inline-drawer-header">
-                    <b>IDIC 陪读窗</b>
+                    <b>酒馆助手</b>
                     <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
                 </div>
                 <div class="inline-drawer-content">
@@ -153,7 +155,9 @@ async function bootstrap() {
 
 async function waitForSillyTavern() {
     const startedAt = Date.now();
-    while (!(window.SillyTavern && typeof window.SillyTavern.getContext === 'function')) {
+    while (!getContextSafe()) {
+        await loadSillyTavernContextApi();
+        if (getContextSafe()) return;
         if (Date.now() - startedAt > 30_000) {
             throw new Error('酒馆环境加载超时');
         }
@@ -162,9 +166,40 @@ async function waitForSillyTavern() {
 }
 
 function getContextSafe() {
-    return window.SillyTavern && typeof window.SillyTavern.getContext === 'function'
-        ? window.SillyTavern.getContext()
-        : null;
+    if (window.SillyTavern && typeof window.SillyTavern.getContext === 'function') {
+        try {
+            return window.SillyTavern.getContext();
+        } catch (_) {
+            return null;
+        }
+    }
+    if (typeof importedGetContext === 'function') {
+        try {
+            return importedGetContext();
+        } catch (_) {
+            return null;
+        }
+    }
+    return null;
+}
+
+async function loadSillyTavernContextApi() {
+    if (typeof importedGetContext === 'function') return;
+    const candidates = [
+        '/scripts/extensions.js',
+        '../../../extensions.js',
+    ];
+    for (const specifier of candidates) {
+        try {
+            const mod = await import(specifier);
+            if (mod && typeof mod.getContext === 'function') {
+                importedGetContext = mod.getContext;
+                return;
+            }
+        } catch (_) {
+            // SillyTavern has used both global and module-based extension helpers.
+        }
+    }
 }
 
 function getContext() {

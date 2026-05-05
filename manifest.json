@@ -1,6 +1,6 @@
 {
   "display_name": "IDIC Companion",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "author": "OpenAI Codex",
   "loading_order": 20,
   "auto_update": true,
