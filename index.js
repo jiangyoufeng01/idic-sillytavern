@@ -1622,7 +1622,7 @@ async function fetchRoleOptions(options = {}) {
             setStatus(runtime.roleOptions.length ? '角色列表已刷新' : '还没有同步到角色', runtime.roleOptions.length ? 'success' : 'info');
         }
     } catch (error) {
-        if (announce) setStatus(`角色读取失败：${error.message}`, 'error');
+        if (announce) setStatus(`角色读取失败：${formatErrorMessage(error)}`, 'error');
         throw error;
     } finally {
         runtime.roleFetchInFlight = false;
@@ -2223,7 +2223,7 @@ async function ensureTurnSummary(turnId, options = {}) {
         turn.summaryOrigin = '';
         await persistChatState();
         if (!options.silent) {
-            setStatus(`摘要生成失败：${error.message}`, 'error');
+            setStatus(`摘要生成失败：${formatErrorMessage(error)}`, 'error');
         }
     }
 }
@@ -2303,14 +2303,18 @@ function getOrderedTurns() {
 }
 
 async function scheduleImmediateContextHydration() {
-    const settings = ensureSettings();
-    const olderTurns = getOrderedTurns().slice(0, Math.max(0, getOrderedTurns().length - settings.recentFullTurns));
-    for (const turn of olderTurns) {
-        if (shouldAutoGenerateSummary(turn) && (turn.summaryStatus === 'missing' || turn.summaryStatus === 'stale' || turn.summaryStatus === 'error')) {
-            await ensureTurnSummary(turn.turnId, { silent: true });
+    try {
+        const settings = ensureSettings();
+        const olderTurns = getOrderedTurns().slice(0, Math.max(0, getOrderedTurns().length - settings.recentFullTurns));
+        for (const turn of olderTurns) {
+            if (shouldAutoGenerateSummary(turn) && (turn.summaryStatus === 'missing' || turn.summaryStatus === 'stale' || turn.summaryStatus === 'error')) {
+                await ensureTurnSummary(turn.turnId, { silent: true });
+            }
         }
+        await ensureStageRollups(true);
+    } catch (error) {
+        console.warn(`[${MODULE_NAME}] context hydration skipped`, error);
     }
-    await ensureStageRollups(true);
 }
 
 function buildReadingContextPayload() {
@@ -2457,7 +2461,11 @@ async function callBridge(action, payload) {
     const parsed = tryParseJson(raw);
     if (!response.ok) {
         const message = getBridgeErrorMessage(parsed, raw, response.status);
-        throw new Error(message);
+        const error = new Error(message);
+        error.status = response.status;
+        error.payload = parsed;
+        error.raw = raw;
+        throw error;
     }
     return parsed && typeof parsed === 'object' ? parsed : {};
 }
@@ -2476,9 +2484,70 @@ function looksLikeSupabaseClientKey(value) {
         || /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(text);
 }
 
+function formatErrorMessage(error, fallback = 'unknown_error') {
+    const message = extractErrorMessage(error, new Set());
+    return message || fallback;
+}
+
+function extractErrorMessage(value, seen) {
+    if (value == null) return '';
+    if (typeof value === 'string') return value.trim();
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (typeof value !== 'object') return String(value || '').trim();
+    if (seen.has(value)) return '';
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+        return uniqueErrorParts(value.map((item) => extractErrorMessage(item, seen))).join('；');
+    }
+
+    const source = value;
+    const parts = [];
+    ['message', 'error', 'details', 'hint', 'description', 'cause'].forEach((key) => {
+        if (source[key] !== undefined) parts.push(extractErrorMessage(source[key], seen));
+    });
+    const text = uniqueErrorParts(parts).join('；');
+    const code = scalarErrorText(source.code || source.status || source.statusCode || source.error_code);
+    if (text) return code && !text.includes(code) ? `${code}：${text}` : text;
+
+    const json = safeStringifyError(value);
+    return json && json !== '{}' ? json : '';
+}
+
+function scalarErrorText(value) {
+    if (typeof value === 'string') return value.trim();
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    return '';
+}
+
+function uniqueErrorParts(parts) {
+    const seen = new Set();
+    return parts.map((part) => toTrimmedString(part))
+        .filter((part) => part && part !== '[object Object]')
+        .filter((part) => {
+            if (seen.has(part)) return false;
+            seen.add(part);
+            return true;
+        });
+}
+
+function safeStringifyError(value) {
+    try {
+        const seen = new Set();
+        return JSON.stringify(value, (key, item) => {
+            if (typeof item !== 'object' || item == null) return item;
+            if (seen.has(item)) return '[Circular]';
+            seen.add(item);
+            return item;
+        });
+    } catch {
+        return String(value || '').trim();
+    }
+}
+
 function getBridgeErrorMessage(parsed, raw, status) {
-    const code = toTrimmedString(parsed?.code || parsed?.error_code);
-    const error = toTrimmedString(parsed?.error || parsed?.message || raw);
+    const code = scalarErrorText(parsed?.code || parsed?.error_code);
+    const error = formatErrorMessage(parsed, toTrimmedString(raw) || `HTTP ${status}`);
     if (code === 'UNAUTHORIZED_NO_AUTH_HEADER' || /NO_AUTH_HEADER/i.test(error)) {
         return '函数还开着 JWT 校验：请重新部署 bridge，并确保 supabase/config.toml 里 verify_jwt = false';
     }
@@ -3281,9 +3350,10 @@ async function sendCompanionMessage() {
     runtime.sendInFlight = true;
     setStatus('正在整理上下文...', 'info');
     await syncStateFromChat({
-        captureLatestStatus: true,
+        captureLatestStatus: false,
         forceLatestRescan: false,
-        maxRecentTurns: ensureSettings().recentFullTurns,
+        maxRecentTurns: 1,
+        lightweight: true,
     });
     await scheduleImmediateContextHydration();
 
@@ -3342,10 +3412,11 @@ async function sendCompanionMessage() {
         renderTranscript();
         setStatus(`已回复，命中 ${Number(response.memoryCount || 0)} 条海马体记忆`, 'success');
     } catch (error) {
+        const message = formatErrorMessage(error);
         replaceTranscriptBatch(pendingBatchId, [{
             id: createId(),
             role: 'system',
-            text: `连接失败：${error.message}`,
+            text: `连接失败：${message}`,
             createdAt: Date.now(),
             batchId: pendingBatchId,
             sourceType: 'system',
@@ -3353,7 +3424,7 @@ async function sendCompanionMessage() {
         await persistChatState();
         scheduleCompanionRecentChatsSync();
         renderTranscript();
-        setStatus(`连接失败：${error.message}`, 'error');
+        setStatus(`连接失败：${message}`, 'error');
     } finally {
         runtime.sendInFlight = false;
         renderBinding();
@@ -3420,9 +3491,10 @@ async function sendBridgeReply(options) {
 
     runtime.sendInFlight = true;
     await syncStateFromChat({
-        captureLatestStatus: true,
+        captureLatestStatus: false,
         forceLatestRescan: false,
-        maxRecentTurns: ensureSettings().recentFullTurns,
+        maxRecentTurns: 1,
+        lightweight: true,
     });
     await scheduleImmediateContextHydration();
 
@@ -3469,10 +3541,11 @@ async function sendBridgeReply(options) {
         renderTranscript();
         setStatus(`已回复，命中 ${Number(response.memoryCount || 0)} 条海马体记忆`, 'success');
     } catch (error) {
+        const message = formatErrorMessage(error);
         replaceTranscriptBatch(pendingBatchId, [{
             id: createId(),
             role: 'system',
-            text: `连接失败：${error.message}`,
+            text: `连接失败：${message}`,
             createdAt: Date.now(),
             batchId: pendingBatchId,
             sourceType: 'system',
@@ -3480,7 +3553,7 @@ async function sendBridgeReply(options) {
         await persistChatState();
         scheduleCompanionRecentChatsSync();
         renderTranscript();
-        setStatus(`连接失败：${error.message}`, 'error');
+        setStatus(`连接失败：${message}`, 'error');
         throw error;
     } finally {
         runtime.sendInFlight = false;

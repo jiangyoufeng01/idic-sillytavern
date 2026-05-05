@@ -36,8 +36,8 @@ const json = (body: unknown, status = 200) =>
         },
     });
 
-const fail = (message: string, status = 400, extra: Obj = {}) =>
-    json({ ok: false, error: message, ...extra }, status);
+const fail = (message: unknown, status = 400, extra: Obj = {}) =>
+    json({ ok: false, error: formatError(message), ...extra }, status);
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -90,7 +90,7 @@ Deno.serve(async (request) => {
         return fail(`unsupported_action:${action || "empty"}`, 400);
     } catch (error) {
         console.error("[idic-companion-bridge] unhandled error", error);
-        return fail(error instanceof Error ? error.message : String(error || "unknown_error"), 500);
+        return fail(error, 500);
     }
 });
 
@@ -786,7 +786,7 @@ async function writeCompanionMemory(input: {
         }
     } catch (error) {
         if (!isMissingBridgeCapability(error)) {
-            throw error;
+            console.warn("[idic-companion-bridge] hippocampus memory write skipped", formatError(error));
         }
         return;
     }
@@ -912,6 +912,65 @@ function arrayOfObjects(value: unknown) {
 
 function asObj(value: unknown): Obj {
     return value && typeof value === "object" ? value as Obj : {};
+}
+
+function formatError(error: unknown, fallback = "unknown_error") {
+    const message = extractErrorText(error, new Set<object>());
+    return message || fallback;
+}
+
+function extractErrorText(value: unknown, seen: Set<object>): string {
+    if (value == null) return "";
+    if (typeof value === "string") return value.trim();
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    if (typeof value !== "object") return String(value || "").trim();
+    if (seen.has(value)) return "";
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+        return uniqueErrorParts(value.map((item) => extractErrorText(item, seen))).join("；");
+    }
+
+    const source = value as Obj;
+    const parts = ["message", "error", "details", "hint", "description", "cause"]
+        .map((key) => extractErrorText(source[key], seen));
+    const text = uniqueErrorParts(parts).join("；");
+    const code = scalarErrorText(source.code ?? source.status ?? source.statusCode ?? source.error_code);
+    if (text) return code && !text.includes(code) ? `${code}：${text}` : text;
+
+    const jsonText = safeStringifyError(value);
+    return jsonText && jsonText !== "{}" ? jsonText : "";
+}
+
+function scalarErrorText(value: unknown) {
+    if (typeof value === "string") return value.trim();
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    return "";
+}
+
+function uniqueErrorParts(parts: string[]) {
+    const seen = new Set<string>();
+    return parts.map((part) => part.trim())
+        .filter((part) => part && part !== "[object Object]")
+        .filter((part) => {
+            if (seen.has(part)) return false;
+            seen.add(part);
+            return true;
+        });
+}
+
+function safeStringifyError(value: unknown) {
+    try {
+        const seen = new Set<object>();
+        return JSON.stringify(value, (_key, item) => {
+            if (typeof item !== "object" || item == null) return item;
+            if (seen.has(item)) return "[Circular]";
+            seen.add(item);
+            return item;
+        });
+    } catch {
+        return String(value || "").trim();
+    }
 }
 
 function trim(value: unknown) {
