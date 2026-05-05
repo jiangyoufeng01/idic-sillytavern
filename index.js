@@ -5,6 +5,7 @@ const TRANSCRIPT_RENDER_PAGE_SIZE = 50;
 const TRANSCRIPT_STORAGE_HARD_CAP = 400;
 const COMPANION_RECENT_CHAT_LIMIT = 50;
 const MODULE_SYNC_MODES = ['content', 'summary', 'fast', 'ignore'];
+const DISCARD_TAGS = Object.freeze(['thinking', 'thought', 'reasoning', 'cot', 'analysis', 'chain-of-thought', 'tool', 'script']);
 const DEFAULT_STATUS_SELECTORS = [
     '.mes_status',
     '.mes-status',
@@ -45,11 +46,11 @@ const runtime = {
     chatState: null,
     panelOpen: false,
     settingsRoot: null,
-    settingsObserver: null,
     settingsMountTimer: null,
     settingsBindingsAttached: false,
     activeStateKey: '',
     backgroundQueue: Promise.resolve(),
+    chatSyncQueue: Promise.resolve(),
     latestTurnId: '',
     sendInFlight: false,
     lastSyncStamp: '',
@@ -189,18 +190,18 @@ function getSettingsContainer() {
     return document.querySelector('#extensions_settings2') || document.querySelector('#extensions_settings');
 }
 
-function watchSettingsContainer() {
-    if (document.body && !runtime.settingsObserver && typeof MutationObserver === 'function') {
-        runtime.settingsObserver = new MutationObserver(() => {
-            void mountSettings();
-        });
-        runtime.settingsObserver.observe(document.body, { childList: true, subtree: true });
+function stopSettingsMountLoop() {
+    if (runtime.settingsMountTimer) {
+        clearInterval(runtime.settingsMountTimer);
+        runtime.settingsMountTimer = null;
     }
+}
 
+function watchSettingsContainer() {
     if (!runtime.settingsMountTimer && typeof window.setInterval === 'function') {
         runtime.settingsMountTimer = window.setInterval(() => {
             void mountSettings();
-        }, 1500);
+        }, 1200);
     }
 }
 
@@ -357,7 +358,7 @@ async function saveChatMeta() {
     }
 }
 
-async function loadCurrentChatState() {
+async function loadCurrentChatState(options = {}) {
     const meta = ensureChatMeta();
     if (!meta) {
         runtime.chatState = createDefaultChatState();
@@ -373,7 +374,9 @@ async function loadCurrentChatState() {
     runtime.transcriptRenderCount = TRANSCRIPT_RENDER_PAGE_SIZE;
     runtime.transcriptSelectionMode = false;
     runtime.selectedTranscriptIds = new Set();
-    await syncStateFromChat({ captureLatestStatus: false, forceLatestRescan: false });
+    if (!options || options.skipChatSync !== true) {
+        await syncStateFromChat(options.syncOptions || { captureLatestStatus: false, forceLatestRescan: false });
+    }
     await saveChatMeta();
 }
 
@@ -606,6 +609,7 @@ async function mountSettings() {
     if (settingsRoot.parentElement !== container) {
         container.appendChild(settingsRoot);
     }
+    stopSettingsMountLoop();
     return true;
 }
 
@@ -1301,9 +1305,19 @@ function bindContextEvents() {
     const source = context.eventSource;
     if (!source || typeof source.on !== 'function') return;
 
+    const queueChatSync = (task, label) => {
+        runtime.chatSyncQueue = runtime.chatSyncQueue
+            .catch(() => undefined)
+            .then(task)
+            .catch((error) => {
+                console.error(`[${MODULE_NAME}] ${label} failed`, error);
+                setStatus('陪读窗同步失败，本次已跳过', 'error');
+            });
+        return runtime.chatSyncQueue;
+    };
+
     const resync = async (options = {}) => {
-        await loadCurrentChatState();
-        await syncStateFromChat(options);
+        await loadCurrentChatState({ syncOptions: options });
         renderAll();
         scheduleBackgroundMaintenance();
     };
@@ -1314,11 +1328,11 @@ function bindContextEvents() {
         scheduleBackgroundMaintenance();
     };
 
-    if (events.CHAT_CHANGED) source.on(events.CHAT_CHANGED, () => void resync({ captureLatestStatus: false, forceLatestRescan: false }));
-    if (events.MESSAGE_RECEIVED) source.on(events.MESSAGE_RECEIVED, () => void messageHandler());
-    if (events.MESSAGE_EDITED) source.on(events.MESSAGE_EDITED, () => void resync({ captureLatestStatus: false, forceLatestRescan: false }));
-    if (events.MESSAGE_DELETED) source.on(events.MESSAGE_DELETED, () => void resync({ captureLatestStatus: false, forceLatestRescan: false }));
-    if (events.MESSAGE_SWIPED) source.on(events.MESSAGE_SWIPED, () => void resync({ captureLatestStatus: false, forceLatestRescan: false }));
+    if (events.CHAT_CHANGED) source.on(events.CHAT_CHANGED, () => void queueChatSync(() => resync({ captureLatestStatus: false, forceLatestRescan: false }), 'chat changed'));
+    if (events.MESSAGE_RECEIVED) source.on(events.MESSAGE_RECEIVED, () => void queueChatSync(() => messageHandler(), 'message received'));
+    if (events.MESSAGE_EDITED) source.on(events.MESSAGE_EDITED, () => void queueChatSync(() => resync({ captureLatestStatus: false, forceLatestRescan: false }), 'message edited'));
+    if (events.MESSAGE_DELETED) source.on(events.MESSAGE_DELETED, () => void queueChatSync(() => resync({ captureLatestStatus: false, forceLatestRescan: false }), 'message deleted'));
+    if (events.MESSAGE_SWIPED) source.on(events.MESSAGE_SWIPED, () => void queueChatSync(() => resync({ captureLatestStatus: false, forceLatestRescan: false }), 'message swiped'));
 }
 
 function bindFloatingDrag() {
@@ -1709,12 +1723,21 @@ async function syncStateFromChat(options = {}) {
         const persistentStatusText = isLatest && captureLatestStatus
             ? readStatusBarText()
             : readSavedStatusText(existing);
+        const previousStatusText = readSavedStatusText(existing);
+        const statusChanged = Boolean(existing) && isLatest && captureLatestStatus && persistentStatusText !== previousStatusText;
+        const forceRescan = (isLatest && forceLatestRescan) || statusChanged;
+        if (existing && existing.sourceHash === candidate.sourceHash && !forceRescan) {
+            newTurns[candidate.turnId] = normalizeTurnEntry(existing, candidate.turnId);
+            newOrder.push(candidate.turnId);
+            latestTurnId = candidate.turnId;
+            return;
+        }
         const nextEntry = materializeTurnEntry(existing, candidate, {
             statusText: persistentStatusText,
-            forceRescan: isLatest && forceLatestRescan,
+            forceRescan,
             isLatest,
         });
-        if (!existing || hashText(JSON.stringify(existing)) !== hashText(JSON.stringify(nextEntry))) {
+        if (!existing || existing.sourceHash !== candidate.sourceHash || forceRescan) {
             stateChanged = true;
         }
         newTurns[candidate.turnId] = nextEntry;
@@ -1800,7 +1823,7 @@ function materializeTurnEntry(existing, candidate, options = {}) {
         userIndex: candidate.userIndex,
         aiIndex: candidate.aiIndex,
         createdAt: previous ? previous.createdAt : Date.now(),
-        updatedAt: Date.now(),
+        updatedAt: previous && !shouldRescan ? previous.updatedAt : Date.now(),
         modules,
         summary: previous ? previous.summary : '',
         summaryTitle: previous ? previous.summaryTitle : '',
@@ -2062,6 +2085,7 @@ function scheduleBackgroundMaintenance() {
         const turns = getOrderedTurns();
         if (turns.length === 0) return;
         const settings = ensureSettings();
+        if (!toTrimmedString(settings.bridgeUrl)) return;
         const olderTurns = turns.slice(0, Math.max(0, turns.length - settings.recentFullTurns));
         for (const turn of olderTurns) {
             if (shouldAutoGenerateSummary(turn) && (turn.summaryStatus === 'missing' || turn.summaryStatus === 'stale' || turn.summaryStatus === 'error')) {
@@ -2649,10 +2673,34 @@ function flattenCompanionTagTree(blocks, bucket = []) {
     return bucket;
 }
 
-function scanAiModules(aiText, options = {}) {
-    const source = String(aiText == null ? '' : aiText);
+function buildFallbackModules(aiText, options = {}) {
     const modules = [];
-    let withoutCode = source.replace(CODE_BLOCK_REGEX, (_, lang, code) => {
+    const fallback = cleanupModuleText(aiText);
+    if (fallback) {
+        modules.push(createModule('plain_text_fallback', 'plain_text', '无标签文本', fallback, {
+            sourceType: 'plain_text',
+            tagName: '',
+            tagKey: 'plain_text',
+            syncMode: 'content',
+        }));
+    }
+    const statusText = cleanupModuleText(options.statusText || '');
+    if (statusText) {
+        modules.push(createModule('statusbar_raw', 'status_bar', '状态栏原文', statusText, {
+            sourceType: 'status_bar',
+            tagName: 'status_bar',
+            tagKey: 'status_bar',
+            syncMode: 'fast',
+        }));
+    }
+    return dedupeModules(modules);
+}
+
+function scanAiModules(aiText, options = {}) {
+    try {
+        const source = String(aiText == null ? '' : aiText);
+        const modules = [];
+        let withoutCode = source.replace(CODE_BLOCK_REGEX, (_, lang, code) => {
         const cleanLang = toTrimmedString(lang).toLowerCase();
         const cleanCode = String(code == null ? '' : code);
         if (looksLikeHtmlBlock(cleanLang, cleanCode)) {
@@ -2714,7 +2762,11 @@ function scanAiModules(aiText, options = {}) {
         }));
     }
 
-    return dedupeModules(modules);
+        return dedupeModules(modules);
+    } catch (error) {
+        console.error(`[${MODULE_NAME}] scan ai modules failed`, error);
+        return buildFallbackModules(aiText, options);
+    }
 }
 
 function renderLatestModules() {
