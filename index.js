@@ -40,6 +40,7 @@ const DEFAULT_SETTINGS = Object.freeze({
 });
 
 let importedGetContext = null;
+let fallbackSettings = {};
 
 const runtime = {
     chatState: null,
@@ -142,15 +143,41 @@ function getFallbackSettingsMarkup() {
 }
 
 async function bootstrap() {
-    await waitForSillyTavern();
-    ensureSettings();
+    await waitForSettingsContainer();
+    await loadSillyTavernContextApi();
     await mountSettings();
     mountPanel();
-    bindContextEvents();
-    await loadCurrentChatState();
-    renderAll();
-    scheduleBackgroundMaintenance();
-    void fetchRoleOptions({ force: true, announce: false }).catch(() => undefined);
+    await initializeWhenContextReady();
+}
+
+async function initializeWhenContextReady() {
+    try {
+        await waitForSillyTavern();
+        ensureSettings();
+        bindContextEvents();
+        await loadCurrentChatState();
+        renderAll();
+        scheduleBackgroundMaintenance();
+        void fetchRoleOptions({ force: true, announce: false }).catch(() => undefined);
+    } catch (error) {
+        console.warn(`[${MODULE_NAME}] context not ready yet`, error);
+        setStatus('等待酒馆上下文，刷新页面后会自动重试', 'info');
+    }
+}
+
+function getSettingsContainer() {
+    return document.querySelector('#extensions_settings2') || document.querySelector('#extensions_settings');
+}
+
+async function waitForSettingsContainer() {
+    const startedAt = Date.now();
+    while (!getSettingsContainer()) {
+        if (Date.now() - startedAt > 30_000) {
+            return null;
+        }
+        await delay(150);
+    }
+    return getSettingsContainer();
 }
 
 async function waitForSillyTavern() {
@@ -204,7 +231,7 @@ async function loadSillyTavernContextApi() {
 
 function getContext() {
     const context = getContextSafe();
-    if (!context) throw new Error('酒馆环境不可用');
+    if (!context) throw new Error('SillyTavern context unavailable');
     return context;
 }
 
@@ -213,28 +240,35 @@ function getLib(name) {
 }
 
 function ensureSettings() {
-    const context = getContext();
-    if (!context.extensionSettings) context.extensionSettings = {};
-    const current = context.extensionSettings[MODULE_NAME] && typeof context.extensionSettings[MODULE_NAME] === 'object'
+    const context = getContextSafe();
+    const current = context && context.extensionSettings && context.extensionSettings[MODULE_NAME] && typeof context.extensionSettings[MODULE_NAME] === 'object'
         ? context.extensionSettings[MODULE_NAME]
-        : {};
-    const normalized = {
-        bridgeUrl: toTrimmedString(current.bridgeUrl),
-        bridgeToken: toTrimmedString(current.bridgeToken),
-        bridgeAuthKey: toTrimmedString(current.bridgeAuthKey),
-        apiUrl: toTrimmedString(current.apiUrl),
-        apiKey: toTrimmedString(current.apiKey),
-        apiModel: toTrimmedString(current.apiModel),
-        apiTemperature: clampFloat(current.apiTemperature, 0, 2, DEFAULT_SETTINGS.apiTemperature),
-        recentFullTurns: clampNumber(current.recentFullTurns, 1, 6, DEFAULT_SETTINGS.recentFullTurns),
-        stageRollupSize: clampNumber(current.stageRollupSize, 5, 60, DEFAULT_SETTINGS.stageRollupSize),
-        maxFullTurnChars: clampNumber(current.maxFullTurnChars, 800, 12000, DEFAULT_SETTINGS.maxFullTurnChars),
-        maxTranscriptTurns: clampNumber(current.maxTranscriptTurns, 4, 40, DEFAULT_SETTINGS.maxTranscriptTurns),
-        statusSelectors: normalizeSelectorsText(current.statusSelectors || DEFAULT_SETTINGS.statusSelectors),
-        autoGenerateSummaryWhenMissing: current.autoGenerateSummaryWhenMissing === true,
-    };
+        : fallbackSettings;
+    const normalized = normalizeSettings(current);
+    fallbackSettings = normalized;
+    if (!context) return normalized;
+    if (!context.extensionSettings) context.extensionSettings = {};
     context.extensionSettings[MODULE_NAME] = normalized;
     return normalized;
+}
+
+function normalizeSettings(current = {}) {
+    const source = current && typeof current === 'object' ? current : {};
+    return {
+        bridgeUrl: toTrimmedString(source.bridgeUrl),
+        bridgeToken: toTrimmedString(source.bridgeToken),
+        bridgeAuthKey: toTrimmedString(source.bridgeAuthKey),
+        apiUrl: toTrimmedString(source.apiUrl),
+        apiKey: toTrimmedString(source.apiKey),
+        apiModel: toTrimmedString(source.apiModel),
+        apiTemperature: clampFloat(source.apiTemperature, 0, 2, DEFAULT_SETTINGS.apiTemperature),
+        recentFullTurns: clampNumber(source.recentFullTurns, 1, 6, DEFAULT_SETTINGS.recentFullTurns),
+        stageRollupSize: clampNumber(source.stageRollupSize, 5, 60, DEFAULT_SETTINGS.stageRollupSize),
+        maxFullTurnChars: clampNumber(source.maxFullTurnChars, 800, 12000, DEFAULT_SETTINGS.maxFullTurnChars),
+        maxTranscriptTurns: clampNumber(source.maxTranscriptTurns, 4, 40, DEFAULT_SETTINGS.maxTranscriptTurns),
+        statusSelectors: normalizeSelectorsText(source.statusSelectors || DEFAULT_SETTINGS.statusSelectors),
+        autoGenerateSummaryWhenMissing: source.autoGenerateSummaryWhenMissing === true,
+    };
 }
 
 function saveSettings() {
@@ -493,18 +527,18 @@ async function mountSettings() {
     ui.openPanelButton = runtime.settingsRoot.querySelector('#idic-companion-open-panel');
 
     const settings = ensureSettings();
-    ui.bridgeUrlInput.value = settings.bridgeUrl;
-    ui.bridgeTokenInput.value = settings.bridgeToken;
-    ui.bridgeAuthKeyInput.value = settings.bridgeAuthKey;
-    ui.apiUrlInput.value = settings.apiUrl;
-    ui.apiKeyInput.value = settings.apiKey;
-    ui.apiModelInput.value = settings.apiModel;
-    ui.apiTemperatureInput.value = String(settings.apiTemperature);
-    ui.recentFullTurnsInput.value = String(settings.recentFullTurns);
-    ui.rollupSizeInput.value = String(settings.stageRollupSize);
-    ui.maxTurnCharsInput.value = String(settings.maxFullTurnChars);
-    ui.maxTranscriptTurnsInput.value = String(settings.maxTranscriptTurns);
-    ui.statusSelectorsInput.value = settings.statusSelectors;
+    if (ui.bridgeUrlInput) ui.bridgeUrlInput.value = settings.bridgeUrl;
+    if (ui.bridgeTokenInput) ui.bridgeTokenInput.value = settings.bridgeToken;
+    if (ui.bridgeAuthKeyInput) ui.bridgeAuthKeyInput.value = settings.bridgeAuthKey;
+    if (ui.apiUrlInput) ui.apiUrlInput.value = settings.apiUrl;
+    if (ui.apiKeyInput) ui.apiKeyInput.value = settings.apiKey;
+    if (ui.apiModelInput) ui.apiModelInput.value = settings.apiModel;
+    if (ui.apiTemperatureInput) ui.apiTemperatureInput.value = String(settings.apiTemperature);
+    if (ui.recentFullTurnsInput) ui.recentFullTurnsInput.value = String(settings.recentFullTurns);
+    if (ui.rollupSizeInput) ui.rollupSizeInput.value = String(settings.stageRollupSize);
+    if (ui.maxTurnCharsInput) ui.maxTurnCharsInput.value = String(settings.maxFullTurnChars);
+    if (ui.maxTranscriptTurnsInput) ui.maxTranscriptTurnsInput.value = String(settings.maxTranscriptTurns);
+    if (ui.statusSelectorsInput) ui.statusSelectorsInput.value = settings.statusSelectors;
     if (ui.autoSummaryToggle) ui.autoSummaryToggle.checked = settings.autoGenerateSummaryWhenMissing;
 
     const bindSetting = (element, key, transform) => {
@@ -512,7 +546,12 @@ async function mountSettings() {
         element.addEventListener('change', () => {
             const settingsRef = ensureSettings();
             settingsRef[key] = transform(element.value);
-            getContext().extensionSettings[MODULE_NAME] = settingsRef;
+            fallbackSettings = settingsRef;
+            const context = getContextSafe();
+            if (context) {
+                if (!context.extensionSettings) context.extensionSettings = {};
+                context.extensionSettings[MODULE_NAME] = settingsRef;
+            }
             saveSettings();
             renderContextStats();
         });
@@ -534,7 +573,12 @@ async function mountSettings() {
         ui.autoSummaryToggle.addEventListener('change', () => {
             const settingsRef = ensureSettings();
             settingsRef.autoGenerateSummaryWhenMissing = Boolean(ui.autoSummaryToggle.checked);
-            getContext().extensionSettings[MODULE_NAME] = settingsRef;
+            fallbackSettings = settingsRef;
+            const context = getContextSafe();
+            if (context) {
+                if (!context.extensionSettings) context.extensionSettings = {};
+                context.extensionSettings[MODULE_NAME] = settingsRef;
+            }
             saveSettings();
             renderContextStats();
             scheduleBackgroundMaintenance();
