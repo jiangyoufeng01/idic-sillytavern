@@ -78,6 +78,9 @@ Deno.serve(async (request) => {
         if (action === "reply") {
             return json(await handleReply(body));
         }
+        if (action === "sync_companion_recent_chats") {
+            return json(await handleSyncCompanionRecentChats(body));
+        }
         if (action === "summarize_turn") {
             return json(await handleSummarizeTurn(body));
         }
@@ -148,16 +151,18 @@ async function handleReply(body: Obj) {
     const transcript = normalizeTranscript(body.transcript);
     const control = normalizeReplyControl(body.replyControl || body);
     const userMessage = trim(body.userMessage);
+    const userMessages = normalizeCompanionUserMessages(body.userMessages, userMessage);
     const stChatLabel = trim(body.stChatLabel);
 
-    if (control.replyMode !== "continue" && !userMessage) {
+    if (control.replyMode !== "continue" && userMessages.length === 0 && !userMessage) {
         throw new Error("user_message_required");
     }
     if (control.replyMode === "continue" && !control.continueFrom) {
         throw new Error("continue_source_required");
     }
 
-    const recalled = await recallBindingMemories(binding, userMessage, readingContext, control);
+    const latestUserBlock = userMessages.length > 0 ? userMessages.join("\n") : userMessage;
+    const recalled = await recallBindingMemories(binding, latestUserBlock, readingContext, control);
     if (recalled.length > 0 && binding.hippocampusEnabled) {
         await activateMemoryIds(binding.userId, recalled.map((item) => item.id).filter(Boolean));
     }
@@ -168,17 +173,18 @@ async function handleReply(body: Obj) {
         readingContext,
         transcript,
         userMessage,
+        userMessages,
         stChatLabel,
         recalled,
         control,
     });
 
-    const reply = await callChatCompletions(messages, apiConfig, apiConfig.temperature, 1000);
+    const reply = await callChatCompletions(messages, apiConfig, apiConfig.temperature, 2600);
 
     await writeCompanionMemory({
         binding,
         readingContext,
-        userMessage,
+        userMessage: latestUserBlock,
         assistantReply: reply,
         control,
     });
@@ -192,6 +198,71 @@ async function handleReply(body: Obj) {
             preview: clip(item.content, 120),
             sourceType: item.sourceType || "",
         })),
+    };
+}
+
+async function handleSyncCompanionRecentChats(body: Obj) {
+    const binding = normalizeBinding(body.binding);
+    const ownerUserId = trim(binding.userId || body.ownerUserId);
+    const charId = trim(binding.charId || body.charId);
+    const charName = trim(binding.charName || binding.displayName || body.charName || body.displayName);
+    if (!ownerUserId || !charId || !charName) {
+        throw new Error("companion_recent_chat_binding_missing");
+    }
+
+    const recentChats = normalizeCompanionRecentChats(body.recentChats);
+    const stChatLabel = trim(body.stChatLabel);
+    const now = new Date().toISOString();
+
+    const { data: existing, error: existingError } = await supabase
+        .from("idic_companion_role_snapshots")
+        .select("display_name,char_name,hippocampus_enabled,snapshot")
+        .eq("owner_user_id", ownerUserId)
+        .eq("char_id", charId)
+        .maybeSingle();
+
+    if (existingError) {
+        if (isMissingRelationError(existingError)) {
+            throw new Error("idic_companion_role_snapshots_table_missing");
+        }
+        throw existingError;
+    }
+
+    const existingSnapshot = asObj(existing?.snapshot);
+    const snapshot = {
+        ...existingSnapshot,
+        charId,
+        charName,
+        displayName: trim(binding.displayName || existing?.display_name || charName),
+        ownerUserId,
+        companionRecentChats: recentChats,
+        companionLastSyncedAt: now,
+        companionStChatLabel: stChatLabel,
+    };
+
+    const { error } = await supabase
+        .from("idic_companion_role_snapshots")
+        .upsert([{
+            owner_user_id: ownerUserId,
+            char_id: charId,
+            char_name: trim(existing?.char_name || charName),
+            display_name: trim(binding.displayName || existing?.display_name || charName),
+            hippocampus_enabled: binding.hippocampusEnabled || toBoolean(existing?.hippocampus_enabled),
+            updated_at: now,
+            snapshot,
+        }], { onConflict: "owner_user_id,char_id" });
+
+    if (error) {
+        if (isMissingRelationError(error)) {
+            throw new Error("idic_companion_role_snapshots_table_missing");
+        }
+        throw error;
+    }
+
+    return {
+        ok: true,
+        count: recentChats.length,
+        updatedAt: now,
     };
 }
 
@@ -349,6 +420,27 @@ function normalizeReplyControl(value: unknown) {
     };
 }
 
+function normalizeCompanionUserMessages(value: unknown, fallback = "") {
+    const rows = arrayOfObjects(value)
+        .map((item) => trim(item.text || item.content || item.message || item.value))
+        .filter(Boolean);
+    if (rows.length > 0) return rows.slice(0, 12);
+    const safeFallback = trim(fallback);
+    return safeFallback ? [safeFallback] : [];
+}
+
+function normalizeCompanionRecentChats(value: unknown) {
+    return arrayOfObjects(value).map((item) => ({
+        id: trim(item.id) || crypto.randomUUID(),
+        role: trim(item.role).toLowerCase() === "assistant" ? "assistant" : "user",
+        content: trim(item.content || item.text || item.message),
+        time: trim(item.time || item.createdAt || item.created_at || new Date().toISOString()),
+        batchId: trim(item.batchId || item.batch_id),
+        source: trim(item.source || "sillytavern_companion"),
+        sourceLabel: trim(item.sourceLabel || item.source_label || "酒馆陪读"),
+    })).filter((item) => item.content).slice(-50);
+}
+
 function normalizeTurnPayload(value: unknown) {
     const source = asObj(value);
     return {
@@ -392,11 +484,12 @@ function buildReplyMessages(input: {
     readingContext: ReadingContext;
     transcript: TranscriptEntry[];
     userMessage: string;
+    userMessages: string[];
     stChatLabel: string;
     recalled: Awaited<ReturnType<typeof recallBindingMemories>>;
     control: ReturnType<typeof normalizeReplyControl>;
 }) {
-    const { binding, readingContext, transcript, userMessage, stChatLabel, recalled, control } = input;
+    const { binding, readingContext, transcript, userMessage, userMessages, stChatLabel, recalled, control } = input;
     const displayName = binding.charName || binding.displayName || "角色";
     const userName = binding.userName || "用户";
 
@@ -413,6 +506,7 @@ function buildReplyMessages(input: {
         binding.userPersona ? `用户人设：${binding.userPersona}` : "",
         binding.systemPrompt ? `额外系统提示：${binding.systemPrompt}` : "",
         promptProfileBlock,
+        "补充输出要求：像主聊天一样一行一句，不要编号，不要项目符号，默认回 4 到 8 句，除非用户明确要求简短，不要只回一两句，也不要说到一半突然收住。",
         "重要规则：",
         "1. 把 SillyTavern 阅读材料当成用户拿给你看的外部剧情，不要把它当成你自己的真实人生。",
         "2. 你的任务是陪读、讨论、吐槽、共情、分析，不要试图接管 SillyTavern 主聊天。",
@@ -452,6 +546,10 @@ function buildReplyMessages(input: {
         ? transcript.map((item) => `${item.role === "assistant" ? displayName : userName}：${item.text}`).join("\n")
         : "（无）";
 
+    const latestUserText = userMessages.length > 0
+        ? userMessages.map((line, index) => `${index + 1}. ${line}`).join("\n")
+        : userMessage;
+
     const tailInstruction = control.replyMode === "continue"
         ? [
             "现在不要重新开话题，也不要改写上一条回复。",
@@ -462,6 +560,7 @@ function buildReplyMessages(input: {
                 ? "这是一次重新回复：请保留同样的上下文和人物状态，但换一种更自然的新说法。"
                 : "现在请回复本轮侧窗消息。",
             `用户刚刚说：${userMessage}`,
+            userMessages.length > 1 ? `用户刚刚连续发了这些消息：\n${latestUserText}` : "",
         ].join("\n");
 
     const userPrompt = [

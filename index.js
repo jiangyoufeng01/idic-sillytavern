@@ -1,6 +1,10 @@
 const MODULE_NAME = 'idic_companion';
 const STATE_STORAGE_PREFIX = 'idic-companion-state:';
 const FLOATING_POSITION_STORAGE_KEY = 'idic-companion-floating-position:v1';
+const TRANSCRIPT_RENDER_PAGE_SIZE = 50;
+const TRANSCRIPT_STORAGE_HARD_CAP = 400;
+const COMPANION_RECENT_CHAT_LIMIT = 50;
+const MODULE_SYNC_MODES = ['content', 'summary', 'fast', 'ignore'];
 const DEFAULT_STATUS_SELECTORS = [
     '.mes_status',
     '.mes-status',
@@ -12,16 +16,13 @@ const DEFAULT_STATUS_SELECTORS = [
 ];
 const CODE_BLOCK_REGEX = /```([\w-]+)?\s*([\s\S]*?)```/g;
 const XML_BLOCK_REGEX = /<([a-zA-Z][\w:-]{0,40})[^>]*>([\s\S]*?)<\/\1>/g;
-const DISCARD_TAGS = [
-    'thought',
-    'thinking',
-    'reasoning',
-    'analysis',
-    'cot',
-    'chainofthought',
-    'reflection',
-    'internal',
-];
+const HTML_TAG_NAMES = new Set([
+    'a', 'article', 'aside', 'audio', 'b', 'blockquote', 'body', 'button', 'canvas', 'code', 'dd', 'details',
+    'div', 'dl', 'dt', 'em', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'header', 'hr', 'html', 'i', 'img', 'input', 'label', 'li', 'main', 'nav', 'ol', 'option', 'p', 'pre',
+    'section', 'select', 'small', 'span', 'strong', 'style', 'sub', 'summary', 'sup', 'svg', 'table', 'tbody',
+    'td', 'textarea', 'tfoot', 'th', 'thead', 'tr', 'ul', 'video',
+]);
 const DEFAULT_SETTINGS = Object.freeze({
     bridgeUrl: '',
     bridgeToken: '',
@@ -51,6 +52,9 @@ const runtime = {
     roleFetchInFlight: false,
     floatingPosition: loadFloatingPosition(),
     dragState: null,
+    transcriptRenderCount: TRANSCRIPT_RENDER_PAGE_SIZE,
+    transcriptSelectionMode: false,
+    selectedTranscriptIds: new Set(),
 };
 
 const ui = {};
@@ -164,6 +168,7 @@ function createDefaultChatState() {
         turns: {},
         stageSummaries: [],
         transcript: [],
+        modulePreferences: {},
         chatSignature: '',
         updatedAt: 0,
     };
@@ -210,6 +215,9 @@ async function loadCurrentChatState() {
     const localforage = getLib('localforage');
     const loaded = localforage ? await localforage.getItem(storageKey) : null;
     runtime.chatState = normalizeChatState(loaded);
+    runtime.transcriptRenderCount = TRANSCRIPT_RENDER_PAGE_SIZE;
+    runtime.transcriptSelectionMode = false;
+    runtime.selectedTranscriptIds = new Set();
     await syncStateFromChat({ captureLatestStatus: false, forceLatestRescan: false });
     await saveChatMeta();
 }
@@ -226,6 +234,9 @@ function normalizeChatState(value) {
         turns: normalizedTurns,
         stageSummaries: Array.isArray(source.stageSummaries) ? source.stageSummaries.map(normalizeStageSummary).filter(Boolean) : [],
         transcript: Array.isArray(source.transcript) ? source.transcript.map(normalizeTranscriptEntry).filter(Boolean) : [],
+        modulePreferences: source.modulePreferences && typeof source.modulePreferences === 'object'
+            ? Object.assign({}, source.modulePreferences)
+            : {},
     });
 }
 
@@ -262,16 +273,32 @@ function normalizeModule(value) {
     if (!source) return null;
     const text = String(source.text == null ? '' : source.text).trim();
     if (!text) return null;
-    const persistence = source.persistence === 'fast' ? 'fast' : 'long';
+    const syncMode = normalizeModuleSyncMode(source);
     return {
         id: toTrimmedString(source.id) || createId(),
-        kind: toTrimmedString(source.kind) || 'other_text_block',
+        kind: toTrimmedString(source.kind) || 'tag_block',
         label: toTrimmedString(source.label) || '文本',
+        tagName: toTrimmedString(source.tagName),
+        tagKey: toTrimmedString(source.tagKey),
+        sourceType: toTrimmedString(source.sourceType) || 'tag_block',
         text,
-        selected: source.selected !== false,
-        persistence,
+        syncMode,
+        selected: syncMode !== 'ignore',
+        persistence: syncMode === 'fast' ? 'fast' : 'long',
         preview: clipText(source.preview || text, 220),
     };
+}
+
+function normalizeModuleSyncMode(source) {
+    const explicit = toTrimmedString(source && source.syncMode);
+    if (MODULE_SYNC_MODES.includes(explicit)) return explicit;
+    if (source && source.selected === false) return 'ignore';
+    if (toTrimmedString(source && source.kind) === 'summary') return 'summary';
+    if (source && source.persistence === 'fast') return 'fast';
+    if (['html_scene_text', 'statusbar_raw', 'fast_text'].includes(toTrimmedString(source && source.kind))) {
+        return 'fast';
+    }
+    return 'content';
 }
 
 function normalizeStageSummary(value) {
@@ -299,6 +326,9 @@ function normalizeTranscriptEntry(value) {
         text,
         createdAt: Number.isFinite(Number(source.createdAt)) ? Number(source.createdAt) : Date.now(),
         pending: Boolean(source.pending),
+        batchId: toTrimmedString(source.batchId),
+        sourceType: toTrimmedString(source.sourceType),
+        sourceTag: toTrimmedString(source.sourceTag),
     };
 }
 
@@ -420,6 +450,13 @@ function mountPanel() {
                 <button id="idic-companion-refresh-roles" class="idic-companion__mini-btn" type="button">刷新</button>
                 <button id="idic-companion-open-sync-sheet" class="idic-companion__mini-btn accent" type="button">同步</button>
             </div>
+            <div id="idic-companion-selectbar" class="idic-companion__selectbar hidden">
+                <span id="idic-companion-select-count" class="idic-companion__select-count">已选 0 条</span>
+                <div class="idic-companion__select-actions">
+                    <button id="idic-companion-select-delete" class="idic-companion__mini-btn danger" type="button">删除</button>
+                    <button id="idic-companion-select-cancel" class="idic-companion__mini-btn" type="button">取消</button>
+                </div>
+            </div>
             <div class="idic-companion__body">
                 <div id="idic-companion-scroll" class="idic-companion__scroll">
                     <div id="idic-companion-transcript" class="idic-companion__transcript">
@@ -473,6 +510,10 @@ function mountPanel() {
     ui.chatTitle = getPanelElement('idic-companion-chat-title');
     ui.subtitle = getPanelElement('idic-companion-subtitle');
     ui.footerStatus = getPanelElement('idic-companion-footer-status');
+    ui.selectBar = getPanelElement('idic-companion-selectbar');
+    ui.selectCount = getPanelElement('idic-companion-select-count');
+    ui.selectDeleteButton = getPanelElement('idic-companion-select-delete');
+    ui.selectCancelButton = getPanelElement('idic-companion-select-cancel');
     ui.closeButton = getPanelElement('idic-companion-close');
     ui.contextChips = getPanelElement('idic-companion-context-chips');
     ui.modulesRoot = getPanelElement('idic-companion-modules');
@@ -509,6 +550,12 @@ function mountPanel() {
     ui.openSyncSheetButton?.addEventListener('click', () => setSyncSheetOpen(true));
     ui.closeSyncSheetButton?.addEventListener('click', () => setSyncSheetOpen(false));
     ui.syncSheetMask?.addEventListener('click', () => setSyncSheetOpen(false));
+    ui.selectDeleteButton?.addEventListener('click', () => {
+        void deleteSelectedTranscriptEntries();
+    });
+    ui.selectCancelButton?.addEventListener('click', () => {
+        exitTranscriptSelectionMode();
+    });
     ui.sendButton?.addEventListener('click', () => {
         void sendCompanionMessage();
     });
@@ -519,10 +566,7 @@ function mountPanel() {
         void continueCompanionReply();
     });
     ui.input?.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' && !event.shiftKey) {
-            event.preventDefault();
-            void sendCompanionMessage();
-        }
+        if (event.key === 'Enter' && !event.shiftKey) return;
     });
     window.addEventListener('resize', applyFloatingLayout);
 }
@@ -702,6 +746,29 @@ function getCompanionPanelCss() {
             opacity: 0.48;
             cursor: not-allowed;
         }
+        .idic-companion__mini-btn.danger {
+            background: #ffe8e8;
+            color: #d64545;
+        }
+        .idic-companion__selectbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 8px 10px;
+            background: #fff7f2;
+            border-bottom: 1px solid rgba(230, 120, 72, 0.14);
+        }
+        .idic-companion__select-count {
+            color: #7b4b32;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .idic-companion__select-actions {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
         .idic-companion__body {
             position: relative;
             flex: 1 1 auto;
@@ -721,11 +788,61 @@ function getCompanionPanelCss() {
             flex-direction: column;
             gap: 10px;
         }
+        .idic-companion__load-more {
+            align-self: center;
+            height: 32px;
+            padding: 0 14px;
+            border-radius: 999px;
+            border: 0;
+            background: rgba(255, 255, 255, 0.92);
+            color: #5570a4;
+            font-size: 12px;
+            font-weight: 600;
+            box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+        }
         .idic-companion__bubble {
             max-width: 90%;
             display: flex;
             flex-direction: column;
             gap: 5px;
+        }
+        .idic-companion__bubble.selectable {
+            position: relative;
+            cursor: pointer;
+        }
+        .idic-companion__bubble.selectable::after {
+            content: "";
+            position: absolute;
+            inset: -4px;
+            border-radius: 20px;
+            border: 2px solid transparent;
+            pointer-events: none;
+            transition: border-color 0.15s ease, background 0.15s ease;
+        }
+        .idic-companion__bubble.selectable.selected::after {
+            border-color: #2f7ff2;
+            background: rgba(47, 127, 242, 0.08);
+        }
+        .idic-companion__bubble-check {
+            position: absolute;
+            top: -2px;
+            right: -2px;
+            width: 20px;
+            height: 20px;
+            border-radius: 999px;
+            background: #fff;
+            color: #9aa4b7;
+            font-size: 11px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 10px rgba(15, 23, 42, 0.12);
+            pointer-events: none;
+        }
+        .idic-companion__bubble.selectable.selected .idic-companion__bubble-check {
+            background: #2f7ff2;
+            color: #fff;
         }
         .idic-companion__bubble.user {
             align-self: flex-end;
@@ -904,22 +1021,60 @@ function getCompanionPanelCss() {
         }
         .idic-companion__module-head {
             display: flex;
-            align-items: center;
+            align-items: flex-start;
             justify-content: space-between;
             gap: 8px;
             margin-bottom: 8px;
         }
         .idic-companion__module-title {
             display: flex;
-            align-items: center;
-            gap: 8px;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 4px;
             color: #111827;
             font-size: 14px;
             font-weight: 600;
         }
-        .idic-companion__module-title input {
-            width: 18px;
-            height: 18px;
+        .idic-companion__module-tag {
+            color: #8a94a7;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        .idic-companion__module-modes {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+        .idic-companion__module-mode {
+            height: 30px;
+            padding: 0 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(99, 115, 145, 0.16);
+            background: #fff;
+            color: #5c6d88;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .idic-companion__module-mode.active[data-mode="content"] {
+            background: #e8f2ff;
+            color: #2064d5;
+            border-color: rgba(32, 100, 213, 0.2);
+        }
+        .idic-companion__module-mode.active[data-mode="summary"] {
+            background: #e9f6ea;
+            color: #2f7a40;
+            border-color: rgba(47, 122, 64, 0.18);
+        }
+        .idic-companion__module-mode.active[data-mode="fast"] {
+            background: #fff2df;
+            color: #b96c0a;
+            border-color: rgba(185, 108, 10, 0.18);
+        }
+        .idic-companion__module-mode.active[data-mode="ignore"] {
+            background: #f1f3f6;
+            color: #68758a;
+            border-color: rgba(104, 117, 138, 0.14);
         }
         .idic-companion__module-preview {
             margin: 0;
@@ -927,6 +1082,11 @@ function getCompanionPanelCss() {
             white-space: pre-wrap;
             word-break: break-word;
             font: 13px/1.5 "PingFang SC", "Microsoft YaHei", sans-serif;
+            max-height: 240px;
+            overflow-y: auto;
+            padding: 10px;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.78);
         }
         @media (min-width: 901px) {
             #idic-companion-launcher {
@@ -1468,28 +1628,52 @@ function mergeModuleSelections(previous, modules) {
     const previousMap = new Map();
     if (previous && Array.isArray(previous.modules)) {
         previous.modules.forEach((module) => {
-            previousMap.set(buildModuleSelectionKey(module), module.selected !== false);
+            previousMap.set(buildModuleSelectionKey(module), getModuleSyncMode(module));
         });
     }
     return modules.map((module) => {
         const key = buildModuleSelectionKey(module);
-        const selected = previousMap.has(key) ? previousMap.get(key) : defaultModuleSelection(module);
-        return Object.assign({}, module, { selected });
+        const preferenceKey = buildModulePreferenceKey(module);
+        const storedPreference = runtime.chatState?.modulePreferences?.[preferenceKey];
+        const syncMode = previousMap.has(key)
+            ? previousMap.get(key)
+            : (MODULE_SYNC_MODES.includes(toTrimmedString(storedPreference?.syncMode))
+                ? toTrimmedString(storedPreference.syncMode)
+                : defaultModuleSyncMode(module));
+        return applyModuleSyncMode(module, syncMode);
     });
 }
 
 function buildModuleSelectionKey(module) {
-    return `${module.kind}::${module.label}::${hashText(module.text).slice(0, 12)}`;
+    return `${module.sourceType || module.kind}::${module.tagKey || module.label}::${hashText(module.text).slice(0, 12)}`;
 }
 
-function defaultModuleSelection(module) {
-    if (module.kind === 'other_text_block') return false;
-    return true;
+function buildModulePreferenceKey(module) {
+    return `${module.sourceType || module.kind}::${module.tagKey || module.label || 'text'}`;
+}
+
+function getModuleSyncMode(module) {
+    return normalizeModuleSyncMode(module || {});
+}
+
+function applyModuleSyncMode(module, syncMode) {
+    const safeMode = MODULE_SYNC_MODES.includes(syncMode) ? syncMode : 'content';
+    return Object.assign({}, module, {
+        syncMode: safeMode,
+        selected: safeMode !== 'ignore',
+        persistence: safeMode === 'fast' ? 'fast' : 'long',
+    });
+}
+
+function defaultModuleSyncMode(module) {
+    if (!module) return 'content';
+    if (module.sourceType === 'status_bar' || module.sourceType === 'html_fragment') return 'fast';
+    return 'content';
 }
 
 function getBuiltInSummaryState(turn) {
     if (!turn || !Array.isArray(turn.modules)) return null;
-    const summaryModules = turn.modules.filter((module) => module.selected && module.kind === 'summary' && module.persistence === 'long' && module.text);
+    const summaryModules = turn.modules.filter((module) => module.selected && getModuleSyncMode(module) === 'summary' && module.persistence === 'long' && module.text);
     if (summaryModules.length === 0) return null;
     return {
         title: summaryModules[0].label || '摘要',
@@ -1747,7 +1931,7 @@ function renderContextStats() {
     const latest = runtime.latestTurnId ? state.turns[runtime.latestTurnId] : null;
     if (ui.openSyncSheetButton) {
         if (latest && Array.isArray(latest.modules) && latest.modules.length > 0) {
-            const selectedCount = latest.modules.filter((module) => module.selected !== false).length;
+            const selectedCount = latest.modules.filter((module) => getModuleSyncMode(module) !== 'ignore').length;
             ui.openSyncSheetButton.textContent = `同步 ${selectedCount}/${latest.modules.length}`;
         } else {
             ui.openSyncSheetButton.textContent = '同步';
@@ -1802,6 +1986,494 @@ function renderLatestModules() {
             scheduleBackgroundMaintenance();
         });
     });
+}
+
+function splitUserMessageLines(text) {
+    return String(text == null ? '' : text)
+        .replace(/\r/g, '\n')
+        .split(/\n+/g)
+        .map((line) => line.trim())
+        .filter(Boolean);
+}
+
+function normalizeAssistantReplyLines(text) {
+    const raw = String(text == null ? '' : text).replace(/\r/g, '\n').trim();
+    if (!raw) return [];
+    const lines = raw
+        .split(/\n+/g)
+        .map((line) => line.replace(/^(\d+[\.\)、]\s*|[-*•]\s*)/, '').trim())
+        .filter(Boolean);
+    return lines.length ? lines : [raw];
+}
+
+function getTranscriptBatchId(item) {
+    return toTrimmedString(item?.batchId) || toTrimmedString(item?.id);
+}
+
+function trimTranscript() {
+    if (!runtime.chatState) return;
+    if (runtime.chatState.transcript.length > TRANSCRIPT_STORAGE_HARD_CAP) {
+        runtime.chatState.transcript = runtime.chatState.transcript.slice(-TRANSCRIPT_STORAGE_HARD_CAP);
+    }
+}
+
+function appendTranscriptEntries(entries, options = {}) {
+    if (!runtime.chatState) runtime.chatState = createDefaultChatState();
+    const items = Array.isArray(entries)
+        ? entries.map((entry) => normalizeTranscriptEntry(entry)).filter(Boolean)
+        : [];
+    if (!items.length) return [];
+    runtime.chatState.transcript.push(...items);
+    trimTranscript();
+    if (options.persist !== false) {
+        void persistChatState();
+    }
+    if (options.sync !== false) {
+        scheduleCompanionRecentChatsSync();
+    }
+    return items;
+}
+
+function replaceTranscriptBatch(batchId, entries, options = {}) {
+    if (!runtime.chatState) runtime.chatState = createDefaultChatState();
+    const safeBatchId = toTrimmedString(batchId);
+    runtime.chatState.transcript = runtime.chatState.transcript.filter((item) => getTranscriptBatchId(item) !== safeBatchId);
+    appendTranscriptEntries(entries, { persist: false, sync: false });
+    trimTranscript();
+    if (options.persist !== false) {
+        void persistChatState();
+    }
+    if (options.sync !== false) {
+        scheduleCompanionRecentChatsSync();
+    }
+}
+
+function findLatestTranscriptBatch(role, beforeIndex = null) {
+    const transcript = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript : [];
+    const startIndex = Number.isFinite(Number(beforeIndex))
+        ? Math.min(transcript.length - 1, Number(beforeIndex) - 1)
+        : transcript.length - 1;
+    for (let index = startIndex; index >= 0; index -= 1) {
+        const item = transcript[index];
+        if (!item || item.pending) continue;
+        if (role && item.role !== role) continue;
+        const batchId = getTranscriptBatchId(item);
+        if (!batchId) continue;
+        let firstIndex = index;
+        while (firstIndex - 1 >= 0 && getTranscriptBatchId(transcript[firstIndex - 1]) === batchId) {
+            firstIndex -= 1;
+        }
+        const items = transcript.slice(firstIndex, index + 1).filter((entry) => getTranscriptBatchId(entry) === batchId);
+        return { batchId, firstIndex, lastIndex: index, items };
+    }
+    return null;
+}
+
+function isTranscriptEntrySelectable(item) {
+    return Boolean(item && !item.pending);
+}
+
+function updateTranscriptSelectionBar() {
+    if (!ui.selectBar || !ui.selectCount) return;
+    const active = Boolean(runtime.transcriptSelectionMode);
+    ui.selectBar.classList.toggle('hidden', !active);
+    if (!active) return;
+    ui.selectCount.textContent = `已选 ${runtime.selectedTranscriptIds.size} 条`;
+}
+
+function enterTranscriptSelectionMode(initialId = '') {
+    runtime.transcriptSelectionMode = true;
+    if (!(runtime.selectedTranscriptIds instanceof Set)) {
+        runtime.selectedTranscriptIds = new Set();
+    }
+    if (initialId) {
+        runtime.selectedTranscriptIds.add(initialId);
+    }
+    updateTranscriptSelectionBar();
+    renderTranscript();
+}
+
+function exitTranscriptSelectionMode() {
+    runtime.transcriptSelectionMode = false;
+    runtime.selectedTranscriptIds = new Set();
+    updateTranscriptSelectionBar();
+    renderTranscript();
+}
+
+function toggleTranscriptSelection(id) {
+    const safeId = toTrimmedString(id);
+    if (!safeId) return;
+    if (!(runtime.selectedTranscriptIds instanceof Set)) {
+        runtime.selectedTranscriptIds = new Set();
+    }
+    if (runtime.selectedTranscriptIds.has(safeId)) {
+        runtime.selectedTranscriptIds.delete(safeId);
+    } else {
+        runtime.selectedTranscriptIds.add(safeId);
+    }
+    if (runtime.selectedTranscriptIds.size === 0) {
+        runtime.transcriptSelectionMode = false;
+    }
+    updateTranscriptSelectionBar();
+    renderTranscript();
+}
+
+async function deleteSelectedTranscriptEntries() {
+    if (!(runtime.selectedTranscriptIds instanceof Set) || runtime.selectedTranscriptIds.size === 0) return;
+    const selectedIds = new Set(runtime.selectedTranscriptIds);
+    runtime.chatState.transcript = runtime.chatState.transcript.filter((item) => !selectedIds.has(String(item?.id || '')));
+    runtime.transcriptSelectionMode = false;
+    runtime.selectedTranscriptIds = new Set();
+    trimTranscript();
+    await persistChatState();
+    scheduleCompanionRecentChatsSync();
+    renderTranscript();
+}
+
+function loadMoreTranscriptMessages() {
+    runtime.transcriptRenderCount += TRANSCRIPT_RENDER_PAGE_SIZE;
+    renderTranscript();
+}
+
+function bindTranscriptBubbleEvents() {
+    if (!ui.transcriptRoot) return;
+    ui.transcriptRoot.querySelector('[data-load-more-transcript]')?.addEventListener('click', () => {
+        loadMoreTranscriptMessages();
+    });
+    ui.transcriptRoot.querySelectorAll('[data-transcript-id]').forEach((element) => {
+        const transcriptId = toTrimmedString(element.getAttribute('data-transcript-id'));
+        if (!transcriptId) return;
+        let longPressTimer = null;
+        let longPressTriggered = false;
+        const clearLongPress = () => {
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+        };
+        element.addEventListener('click', () => {
+            if (longPressTriggered) {
+                longPressTriggered = false;
+                return;
+            }
+            if (!runtime.transcriptSelectionMode) return;
+            toggleTranscriptSelection(transcriptId);
+        });
+        element.addEventListener('pointerdown', () => {
+            if (runtime.transcriptSelectionMode) return;
+            longPressTimer = setTimeout(() => {
+                longPressTriggered = true;
+                enterTranscriptSelectionMode(transcriptId);
+                longPressTimer = null;
+            }, 420);
+        });
+        element.addEventListener('pointerup', clearLongPress);
+        element.addEventListener('pointerleave', clearLongPress);
+        element.addEventListener('pointercancel', clearLongPress);
+        element.addEventListener('pointermove', clearLongPress);
+    });
+}
+
+function renderTranscript() {
+    if (!ui.transcriptRoot) return;
+    const transcript = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript : [];
+    const roleName = getActiveRoleName();
+    renderComposerState(roleName);
+    updateTranscriptSelectionBar();
+    if (transcript.length === 0) {
+        ui.transcriptRoot.innerHTML = `<div class="idic-companion__empty">${roleName ? '还没开聊' : '先选角色'}</div>`;
+        return;
+    }
+    const binding = ensureChatMeta()?.binding || createDefaultBinding();
+    const assistantName = binding.displayName || binding.charName || '陪读';
+    const renderCount = Math.max(TRANSCRIPT_RENDER_PAGE_SIZE, runtime.transcriptRenderCount || TRANSCRIPT_RENDER_PAGE_SIZE);
+    const startIndex = Math.max(0, transcript.length - renderCount);
+    const visibleItems = transcript.slice(startIndex);
+    const html = [];
+    if (startIndex > 0) {
+        html.push('<button type="button" class="idic-companion__load-more" data-load-more-transcript="1">更多消息</button>');
+    }
+    visibleItems.forEach((item) => {
+        const role = item.role;
+        const cls = role === 'user' ? 'user' : (role === 'assistant' ? 'assistant' : 'system');
+        const timestamp = new Date(item.createdAt).toLocaleTimeString();
+        const speaker = role === 'user' ? '你' : (role === 'assistant' ? assistantName : '系统');
+        const selectable = isTranscriptEntrySelectable(item);
+        const selected = selectable && runtime.selectedTranscriptIds instanceof Set && runtime.selectedTranscriptIds.has(String(item.id));
+        html.push(`
+            <div class="idic-companion__bubble ${cls} ${selectable ? 'selectable' : ''} ${selected ? 'selected' : ''}" ${selectable ? `data-transcript-id="${escapeHtml(item.id)}"` : ''}>
+                ${selectable ? `<span class="idic-companion__bubble-check">${selected ? '✓' : ''}</span>` : ''}
+                <div class="idic-companion__bubble-box">${escapeHtml(item.text)}</div>
+                <div class="idic-companion__bubble-meta">${escapeHtml(speaker)} · ${escapeHtml(timestamp)}${item.pending ? ' · 发送中' : ''}</div>
+            </div>
+        `);
+    });
+    ui.transcriptRoot.innerHTML = html.join('');
+    bindTranscriptBubbleEvents();
+    if (ui.scrollRoot && !runtime.transcriptSelectionMode) {
+        ui.scrollRoot.scrollTop = ui.scrollRoot.scrollHeight;
+    }
+}
+
+function buildTranscriptPayload() {
+    const settings = ensureSettings();
+    const transcript = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript : [];
+    const maxItems = Math.max(2, settings.maxTranscriptTurns * 2);
+    return transcript
+        .filter((item) => !item.pending && (item.role === 'user' || item.role === 'assistant'))
+        .slice(-maxItems)
+        .map((item) => ({
+            role: item.role,
+            text: item.text,
+        }));
+}
+
+function buildCompanionRecentChatsPayload() {
+    const transcript = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript : [];
+    return transcript
+        .filter((item) => !item.pending && (item.role === 'user' || item.role === 'assistant'))
+        .slice(-COMPANION_RECENT_CHAT_LIMIT)
+        .map((item) => ({
+            id: item.id,
+            role: item.role,
+            content: item.text,
+            time: new Date(item.createdAt || Date.now()).toISOString(),
+            batchId: getTranscriptBatchId(item),
+            source: 'sillytavern_companion',
+            sourceLabel: '酒馆陪读',
+        }));
+}
+
+function scheduleCompanionRecentChatsSync(delayMs = 700) {
+    if (runtime.companionRecentChatsSyncTimer) {
+        clearTimeout(runtime.companionRecentChatsSyncTimer);
+    }
+    runtime.companionRecentChatsSyncTimer = setTimeout(() => {
+        runtime.companionRecentChatsSyncTimer = null;
+        void syncCompanionRecentChatsToSnapshot();
+    }, Math.max(120, Number(delayMs) || 700));
+}
+
+async function syncCompanionRecentChatsToSnapshot() {
+    const binding = getBindingPayload();
+    if (!binding.userId || !binding.charId) return;
+    try {
+        await callBridge('sync_companion_recent_chats', {
+            binding,
+            recentChats: buildCompanionRecentChatsPayload(),
+            stChatLabel: getCurrentChatLabel(),
+        });
+    } catch (error) {
+        console.warn(`[${MODULE_NAME}] recent chat sync failed`, error);
+    }
+}
+
+async function sendCompanionMessage() {
+    if (runtime.sendInFlight) return;
+    const lines = splitUserMessageLines(ui.input?.value);
+    if (lines.length === 0) return;
+
+    await saveBindingFromSelection({ silent: true });
+    const binding = getBindingPayload();
+    if (!binding.charId || !binding.charName || (!binding.charPersona && !binding.promptProfile)) {
+        notify('请先选角色', 'warning');
+        setPanelOpen(true);
+        return;
+    }
+
+    runtime.sendInFlight = true;
+    setStatus('正在整理上下文...', 'info');
+    await syncStateFromChat({ captureLatestStatus: true, forceLatestRescan: false });
+    await scheduleImmediateContextHydration();
+
+    const userBatchId = createId();
+    const pendingBatchId = createId();
+    const now = Date.now();
+    appendTranscriptEntries(lines.map((text, index) => ({
+        id: createId(),
+        role: 'user',
+        text,
+        createdAt: now + index,
+        batchId: userBatchId,
+        sourceType: 'companion',
+    })), { persist: false, sync: false });
+    appendTranscriptEntries([{
+        id: createId(),
+        role: 'assistant',
+        text: '...',
+        createdAt: now + lines.length + 1,
+        pending: true,
+        batchId: pendingBatchId,
+        sourceType: 'companion',
+    }], { persist: false, sync: false });
+    trimTranscript();
+    await persistChatState();
+    scheduleCompanionRecentChatsSync();
+    renderTranscript();
+    if (ui.input) ui.input.value = '';
+
+    try {
+        const response = await callBridge('reply', {
+            binding,
+            apiConfig: getApiConfigPayload(),
+            readingContext: buildReadingContextPayload(),
+            transcript: buildTranscriptPayload(),
+            userMessage: lines.join('\n'),
+            userMessages: lines,
+            stChatLabel: getCurrentChatLabel(),
+            replyControl: {
+                replyMode: 'normal',
+            },
+        });
+        const replyLines = normalizeAssistantReplyLines(toTrimmedString(response.reply) || '没有收到回复');
+        replaceTranscriptBatch(pendingBatchId, replyLines.map((text, index) => ({
+            id: createId(),
+            role: 'assistant',
+            text,
+            createdAt: Date.now() + index,
+            batchId: pendingBatchId,
+            sourceType: 'companion',
+        })));
+        await persistChatState();
+        scheduleCompanionRecentChatsSync();
+        renderTranscript();
+        setStatus(`已回复，命中 ${Number(response.memoryCount || 0)} 条海马体记忆`, 'success');
+    } catch (error) {
+        replaceTranscriptBatch(pendingBatchId, [{
+            id: createId(),
+            role: 'system',
+            text: `连接失败：${error.message}`,
+            createdAt: Date.now(),
+            batchId: pendingBatchId,
+            sourceType: 'system',
+        }]);
+        await persistChatState();
+        renderTranscript();
+        setStatus(`连接失败：${error.message}`, 'error');
+    } finally {
+        runtime.sendInFlight = false;
+        renderBinding();
+    }
+}
+
+async function regenerateCompanionReply() {
+    if (runtime.sendInFlight) return;
+    const transcriptSnapshot = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript.slice() : [];
+    const lastAssistantBatch = findLatestTranscriptBatch('assistant');
+    const lastUserBatch = lastAssistantBatch
+        ? findLatestTranscriptBatch('user', lastAssistantBatch.firstIndex)
+        : findLatestTranscriptBatch('user');
+    if (!lastUserBatch) {
+        notify('还没有可重写的上一轮', 'info');
+        return;
+    }
+
+    if (lastAssistantBatch) {
+        runtime.chatState.transcript = runtime.chatState.transcript.filter((item) => getTranscriptBatchId(item) !== lastAssistantBatch.batchId);
+        await persistChatState();
+        renderTranscript();
+    }
+
+    await sendBridgeReply({
+        userMessage: lastUserBatch.items.map((item) => item.text).join('\n'),
+        userMessages: lastUserBatch.items.map((item) => item.text),
+        replyMode: 'regenerate',
+        statusLabel: '正在重写...',
+    }).catch(async (error) => {
+        runtime.chatState.transcript = transcriptSnapshot;
+        await persistChatState();
+        renderTranscript();
+        throw error;
+    });
+}
+
+async function continueCompanionReply() {
+    if (runtime.sendInFlight) return;
+    const lastAssistantBatch = findLatestTranscriptBatch('assistant');
+    if (!lastAssistantBatch || lastAssistantBatch.items.length === 0) {
+        notify('还没有可续写的回复', 'info');
+        return;
+    }
+
+    await sendBridgeReply({
+        userMessage: '',
+        userMessages: [],
+        replyMode: 'continue',
+        continueFrom: lastAssistantBatch.items.map((item) => item.text).join('\n'),
+        statusLabel: '正在续写...',
+    });
+}
+
+async function sendBridgeReply(options) {
+    await saveBindingFromSelection({ silent: true });
+    const binding = getBindingPayload();
+    if (!binding.charId || !binding.charName || (!binding.charPersona && !binding.promptProfile)) {
+        notify('请先选角色', 'warning');
+        return;
+    }
+
+    runtime.sendInFlight = true;
+    await syncStateFromChat({ captureLatestStatus: true, forceLatestRescan: false });
+    await scheduleImmediateContextHydration();
+
+    const pendingBatchId = createId();
+    appendTranscriptEntries([{
+        id: createId(),
+        role: 'assistant',
+        text: '...',
+        createdAt: Date.now(),
+        pending: true,
+        batchId: pendingBatchId,
+        sourceType: 'companion',
+    }], { persist: false, sync: false });
+    await persistChatState();
+    renderTranscript();
+    setStatus(options.statusLabel || '对方正在输入...', 'info');
+
+    try {
+        const response = await callBridge('reply', {
+            binding,
+            apiConfig: getApiConfigPayload(),
+            readingContext: buildReadingContextPayload(),
+            transcript: buildTranscriptPayload(),
+            userMessage: toTrimmedString(options.userMessage),
+            userMessages: Array.isArray(options.userMessages) ? options.userMessages : [],
+            stChatLabel: getCurrentChatLabel(),
+            replyControl: {
+                replyMode: options.replyMode || 'normal',
+                continueFrom: toTrimmedString(options.continueFrom),
+            },
+        });
+        const replyLines = normalizeAssistantReplyLines(toTrimmedString(response.reply) || '没有收到回复');
+        replaceTranscriptBatch(pendingBatchId, replyLines.map((text, index) => ({
+            id: createId(),
+            role: 'assistant',
+            text,
+            createdAt: Date.now() + index,
+            batchId: pendingBatchId,
+            sourceType: 'companion',
+        })));
+        await persistChatState();
+        scheduleCompanionRecentChatsSync();
+        renderTranscript();
+        setStatus(`已回复，命中 ${Number(response.memoryCount || 0)} 条海马体记忆`, 'success');
+    } catch (error) {
+        replaceTranscriptBatch(pendingBatchId, [{
+            id: createId(),
+            role: 'system',
+            text: `连接失败：${error.message}`,
+            createdAt: Date.now(),
+            batchId: pendingBatchId,
+            sourceType: 'system',
+        }]);
+        await persistChatState();
+        renderTranscript();
+        setStatus(`连接失败：${error.message}`, 'error');
+        throw error;
+    } finally {
+        runtime.sendInFlight = false;
+        renderBinding();
+    }
 }
 
 function renderTranscript() {
@@ -2463,6 +3135,226 @@ function createId() {
     return `idic-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function getModuleSyncModeLabel(mode) {
+    if (mode === 'summary') return '摘要';
+    if (mode === 'fast') return '快餐';
+    if (mode === 'ignore') return '忽略';
+    return '正文';
+}
+
+function getModuleSourceTag(module) {
+    if (module?.tagName) return `<${module.tagName}>`;
+    if (module?.sourceType === 'status_bar') return '状态栏原文';
+    if (module?.sourceType === 'html_fragment') return 'HTML片段';
+    if (module?.sourceType === 'plain_text') return '无标签文本';
+    return module?.label || '文本块';
+}
+
+function rememberModuleSyncPreference(module, syncMode) {
+    if (!runtime.chatState) runtime.chatState = createDefaultChatState();
+    const preferenceKey = buildModulePreferenceKey(module);
+    if (!preferenceKey) return;
+    runtime.chatState.modulePreferences[preferenceKey] = {
+        syncMode,
+        updatedAt: Date.now(),
+    };
+}
+
+function stripMatchedBlocks(source, blocks) {
+    const chars = String(source || '').split('');
+    blocks.forEach((block) => {
+        const start = Math.max(0, Number(block?.start) || 0);
+        const end = Math.max(start, Number(block?.end) || start);
+        for (let index = start; index < end && index < chars.length; index += 1) {
+            chars[index] = ' ';
+        }
+    });
+    return chars.join('');
+}
+
+function containsStandardHtmlTags(source) {
+    const matches = String(source || '').match(/<\/?([a-z][\w:-]{0,40})[^>]*>/gi) || [];
+    return matches.some((rawTag) => {
+        const match = rawTag.match(/<\/?([a-z][\w:-]{0,40})/i);
+        return Boolean(match && HTML_TAG_NAMES.has(String(match[1] || '').toLowerCase()));
+    });
+}
+
+function normalizeTagKey(tagName) {
+    return String(tagName || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^\w:-]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+}
+
+function extractTagBlocks(source) {
+    const blocks = [];
+    let match;
+    XML_BLOCK_REGEX.lastIndex = 0;
+    while ((match = XML_BLOCK_REGEX.exec(String(source || ''))) !== null) {
+        const tagName = String(match[1] || '').trim();
+        if (!tagName || HTML_TAG_NAMES.has(tagName.toLowerCase())) continue;
+        blocks.push({
+            tagName,
+            innerText: String(match[2] || ''),
+            start: match.index,
+            end: match.index + String(match[0] || '').length,
+        });
+    }
+    return blocks;
+}
+
+function createModule(id, kind, label, text, options = {}) {
+    const finalText = cleanupModuleText(text);
+    const syncMode = MODULE_SYNC_MODES.includes(options.syncMode) ? options.syncMode : defaultModuleSyncMode(options);
+    return applyModuleSyncMode({
+        id,
+        kind,
+        label,
+        tagName: toTrimmedString(options.tagName),
+        tagKey: toTrimmedString(options.tagKey),
+        sourceType: toTrimmedString(options.sourceType) || kind,
+        text: finalText,
+        preview: clipText(finalText, 220),
+    }, syncMode);
+}
+
+function scanAiModules(aiText, options = {}) {
+    const source = String(aiText == null ? '' : aiText);
+    const modules = [];
+    let withoutCode = source.replace(CODE_BLOCK_REGEX, (_, lang, code) => {
+        const cleanLang = toTrimmedString(lang).toLowerCase();
+        const cleanCode = String(code == null ? '' : code);
+        if (looksLikeHtmlBlock(cleanLang, cleanCode)) {
+            const visible = extractVisibleTextFromHtml(cleanCode);
+            if (visible) {
+                modules.push(createModule(`html_code_${modules.length}`, 'html_fragment', 'HTML片段', visible, {
+                    sourceType: 'html_fragment',
+                    tagName: 'HTML',
+                    tagKey: 'html_fragment',
+                    syncMode: 'fast',
+                }));
+            }
+        }
+        return ' ';
+    });
+
+    const tagMatches = extractTagBlocks(withoutCode);
+    tagMatches.forEach((block, index) => {
+        const visible = cleanupModuleText(block.innerText);
+        if (!visible) return;
+        modules.push(createModule(`tag_${index}`, 'tag_block', `<${block.tagName}>`, visible, {
+            sourceType: 'tag_block',
+            tagName: block.tagName,
+            tagKey: normalizeTagKey(block.tagName),
+            syncMode: 'content',
+        }));
+    });
+    withoutCode = stripMatchedBlocks(withoutCode, tagMatches);
+
+    if (containsStandardHtmlTags(withoutCode)) {
+        const htmlVisible = cleanupModuleText(extractVisibleTextFromHtml(withoutCode));
+        if (htmlVisible) {
+            modules.push(createModule('html_fragment_inline', 'html_fragment', 'HTML片段', htmlVisible, {
+                sourceType: 'html_fragment',
+                tagName: 'HTML',
+                tagKey: 'html_fragment',
+                syncMode: 'fast',
+            }));
+        }
+        withoutCode = withoutCode.replace(/<\/?[a-z][^>]*>/gi, ' ');
+    }
+
+    const fallback = cleanupModuleText(withoutCode);
+    if (fallback) {
+        modules.push(createModule('plain_text', 'plain_text', '无标签文本', fallback, {
+            sourceType: 'plain_text',
+            tagName: '',
+            tagKey: 'plain_text',
+            syncMode: 'content',
+        }));
+    }
+
+    const statusText = cleanupModuleText(options.statusText || '');
+    if (statusText) {
+        modules.push(createModule('statusbar_raw', 'status_bar', '状态栏原文', statusText, {
+            sourceType: 'status_bar',
+            tagName: 'status_bar',
+            tagKey: 'status_bar',
+            syncMode: 'fast',
+        }));
+    }
+
+    return dedupeModules(modules);
+}
+
+function renderLatestModules() {
+    if (!ui.modulesRoot) return;
+    const latest = runtime.latestTurnId ? runtime.chatState?.turns?.[runtime.latestTurnId] : null;
+    if (!latest) {
+        ui.modulesRoot.innerHTML = '<div class="idic-companion__empty">暂无内容</div>';
+        return;
+    }
+
+    if (!Array.isArray(latest.modules) || latest.modules.length === 0) {
+        ui.modulesRoot.innerHTML = '<div class="idic-companion__empty">这楼还没拆出可同步内容</div>';
+        return;
+    }
+
+    ui.modulesRoot.innerHTML = latest.modules.map((module) => {
+        const mode = getModuleSyncMode(module);
+        return `
+            <div class="idic-companion__module" data-module-id="${escapeHtml(module.id)}">
+                <div class="idic-companion__module-head">
+                    <div class="idic-companion__module-title">
+                        <span>${escapeHtml(module.label)}</span>
+                        <span class="idic-companion__module-tag">${escapeHtml(getModuleSourceTag(module))}</span>
+                    </div>
+                    <span class="idic-companion__chip ${mode === 'fast' ? 'fast' : 'long'}">${escapeHtml(getModuleSyncModeLabel(mode))}</span>
+                </div>
+                <div class="idic-companion__module-modes">
+                    ${MODULE_SYNC_MODES.map((value) => `
+                        <button
+                            type="button"
+                            class="idic-companion__module-mode ${mode === value ? 'active' : ''}"
+                            data-module-mode="${escapeHtml(module.id)}"
+                            data-mode="${escapeHtml(value)}"
+                        >${escapeHtml(getModuleSyncModeLabel(value))}</button>
+                    `).join('')}
+                </div>
+                <pre class="idic-companion__module-preview">${escapeHtml(module.text)}</pre>
+            </div>
+        `;
+    }).join('');
+
+    ui.modulesRoot.querySelectorAll('[data-module-mode]').forEach((element) => {
+        element.addEventListener('click', async (event) => {
+            const target = event.currentTarget;
+            if (!(target instanceof HTMLButtonElement)) return;
+            const moduleId = target.getAttribute('data-module-mode');
+            const mode = target.getAttribute('data-mode');
+            if (!moduleId || !MODULE_SYNC_MODES.includes(String(mode))) return;
+            const turn = runtime.chatState?.turns?.[runtime.latestTurnId];
+            if (!turn) return;
+            const previousTurn = normalizeTurnEntry(turn, turn.turnId);
+            turn.modules = turn.modules.map((module) => {
+                if (module.id !== moduleId) return module;
+                const updated = applyModuleSyncMode(module, String(mode));
+                rememberModuleSyncPreference(updated, String(mode));
+                return updated;
+            });
+            turn.summarySourceDigest = computePersistentDigest(turn.userText, turn.modules);
+            refreshTurnSummaryState(turn, previousTurn);
+            runtime.chatState.stageSummaries = [];
+            await persistChatState();
+            renderContextStats();
+            renderLatestModules();
+            scheduleBackgroundMaintenance();
+        });
+    });
+}
+
 function toTrimmedString(value) {
     return String(value == null ? '' : value).trim();
 }
@@ -2481,4 +3373,756 @@ function clampFloat(value, min, max, fallback) {
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getModuleSyncModeLabel(mode) {
+    if (mode === 'summary') return '摘要';
+    if (mode === 'fast') return '快餐';
+    if (mode === 'ignore') return '忽略';
+    return '正文';
+}
+
+function getModuleSourceTag(module) {
+    if (module?.tagName) return `<${module.tagName}>`;
+    if (module?.sourceType === 'status_bar') return '状态栏原文';
+    if (module?.sourceType === 'html_fragment') return 'HTML片段';
+    if (module?.sourceType === 'plain_text') return '无标签文本';
+    return module?.label || '文本块';
+}
+
+function rememberModuleSyncPreference(module, syncMode) {
+    if (!runtime.chatState) runtime.chatState = createDefaultChatState();
+    const preferenceKey = buildModulePreferenceKey(module);
+    if (!preferenceKey) return;
+    runtime.chatState.modulePreferences[preferenceKey] = {
+        syncMode,
+        updatedAt: Date.now(),
+    };
+}
+
+function collectCompanionTagTree(source) {
+    const blocks = [];
+    let match;
+    XML_BLOCK_REGEX.lastIndex = 0;
+    while ((match = XML_BLOCK_REGEX.exec(String(source || ''))) !== null) {
+        const tagName = String(match[1] || '').trim();
+        if (!tagName || HTML_TAG_NAMES.has(tagName.toLowerCase())) continue;
+        const rawInnerText = String(match[2] || '');
+        const nested = collectCompanionTagTree(rawInnerText);
+        blocks.push({
+            tagName,
+            rawInnerText,
+            innerText: stripMatchedBlocks(rawInnerText, nested),
+            start: match.index,
+            end: match.index + String(match[0] || '').length,
+            nested,
+        });
+    }
+    return blocks;
+}
+
+function flattenCompanionTagTree(blocks, bucket = []) {
+    blocks.forEach((block) => {
+        const visibleText = cleanupModuleText(block.innerText);
+        if (visibleText) {
+            bucket.push({
+                tagName: block.tagName,
+                innerText: visibleText,
+                start: block.start,
+                end: block.end,
+            });
+        }
+        if (Array.isArray(block.nested) && block.nested.length > 0) {
+            flattenCompanionTagTree(block.nested, bucket);
+        }
+    });
+    return bucket;
+}
+
+function scanAiModules(aiText, options = {}) {
+    const source = String(aiText == null ? '' : aiText);
+    const modules = [];
+    let withoutCode = source.replace(CODE_BLOCK_REGEX, (_, lang, code) => {
+        const cleanLang = toTrimmedString(lang).toLowerCase();
+        const cleanCode = String(code == null ? '' : code);
+        if (looksLikeHtmlBlock(cleanLang, cleanCode)) {
+            const visible = cleanupModuleText(extractVisibleTextFromHtml(cleanCode));
+            if (visible) {
+                modules.push(createModule(`html_code_${modules.length}`, 'html_fragment', 'HTML片段', visible, {
+                    sourceType: 'html_fragment',
+                    tagName: 'HTML',
+                    tagKey: 'html_fragment',
+                    syncMode: 'fast',
+                }));
+            }
+        }
+        return ' ';
+    });
+
+    const tagTree = collectCompanionTagTree(withoutCode);
+    const tagBlocks = flattenCompanionTagTree(tagTree);
+    tagBlocks.forEach((block, index) => {
+        modules.push(createModule(`tag_${index}`, 'tag_block', `<${block.tagName}>`, block.innerText, {
+            sourceType: 'tag_block',
+            tagName: block.tagName,
+            tagKey: normalizeTagKey(block.tagName),
+            syncMode: 'content',
+        }));
+    });
+    withoutCode = stripMatchedBlocks(withoutCode, tagTree);
+
+    if (containsStandardHtmlTags(withoutCode)) {
+        const htmlVisible = cleanupModuleText(extractVisibleTextFromHtml(withoutCode));
+        if (htmlVisible) {
+            modules.push(createModule('html_fragment_inline', 'html_fragment', 'HTML片段', htmlVisible, {
+                sourceType: 'html_fragment',
+                tagName: 'HTML',
+                tagKey: 'html_fragment',
+                syncMode: 'fast',
+            }));
+        }
+        withoutCode = withoutCode.replace(/<\/?[a-z][^>]*>/gi, ' ');
+    }
+
+    const fallback = cleanupModuleText(withoutCode);
+    if (fallback) {
+        modules.push(createModule('plain_text', 'plain_text', '无标签文本', fallback, {
+            sourceType: 'plain_text',
+            tagName: '',
+            tagKey: 'plain_text',
+            syncMode: 'content',
+        }));
+    }
+
+    const statusText = cleanupModuleText(options.statusText || '');
+    if (statusText) {
+        modules.push(createModule('statusbar_raw', 'status_bar', '状态栏原文', statusText, {
+            sourceType: 'status_bar',
+            tagName: 'status_bar',
+            tagKey: 'status_bar',
+            syncMode: 'fast',
+        }));
+    }
+
+    return dedupeModules(modules);
+}
+
+function renderLatestModules() {
+    if (!ui.modulesRoot) return;
+    const latest = runtime.latestTurnId ? runtime.chatState?.turns?.[runtime.latestTurnId] : null;
+    if (!latest) {
+        ui.modulesRoot.innerHTML = '<div class="idic-companion__empty">暂无可同步内容</div>';
+        return;
+    }
+
+    if (!Array.isArray(latest.modules) || latest.modules.length === 0) {
+        ui.modulesRoot.innerHTML = '<div class="idic-companion__empty">这一楼还没有拆出可同步模块</div>';
+        return;
+    }
+
+    ui.modulesRoot.innerHTML = latest.modules.map((module) => {
+        const mode = getModuleSyncMode(module);
+        return `
+            <div class="idic-companion__module" data-module-id="${escapeHtml(module.id)}">
+                <div class="idic-companion__module-head">
+                    <div class="idic-companion__module-title">
+                        <span>${escapeHtml(module.label)}</span>
+                        <span class="idic-companion__module-tag">${escapeHtml(getModuleSourceTag(module))}</span>
+                    </div>
+                    <span class="idic-companion__chip ${mode === 'fast' ? 'fast' : 'long'}">${escapeHtml(getModuleSyncModeLabel(mode))}</span>
+                </div>
+                <div class="idic-companion__module-modes">
+                    ${MODULE_SYNC_MODES.map((value) => `
+                        <button
+                            type="button"
+                            class="idic-companion__module-mode ${mode === value ? 'active' : ''}"
+                            data-module-mode="${escapeHtml(module.id)}"
+                            data-mode="${escapeHtml(value)}"
+                        >${escapeHtml(getModuleSyncModeLabel(value))}</button>
+                    `).join('')}
+                </div>
+                <pre class="idic-companion__module-preview">${escapeHtml(module.text)}</pre>
+            </div>
+        `;
+    }).join('');
+
+    ui.modulesRoot.querySelectorAll('[data-module-mode]').forEach((element) => {
+        element.addEventListener('click', async (event) => {
+            const target = event.currentTarget;
+            if (!(target instanceof HTMLButtonElement)) return;
+            const moduleId = target.getAttribute('data-module-mode');
+            const mode = target.getAttribute('data-mode');
+            if (!moduleId || !MODULE_SYNC_MODES.includes(String(mode))) return;
+            const turn = runtime.chatState?.turns?.[runtime.latestTurnId];
+            if (!turn) return;
+            const previousTurn = normalizeTurnEntry(turn, turn.turnId);
+            turn.modules = turn.modules.map((module) => {
+                if (module.id !== moduleId) return module;
+                const updated = applyModuleSyncMode(module, String(mode));
+                rememberModuleSyncPreference(updated, String(mode));
+                return updated;
+            });
+            turn.summarySourceDigest = computePersistentDigest(turn.userText, turn.modules);
+            refreshTurnSummaryState(turn, previousTurn);
+            runtime.chatState.stageSummaries = [];
+            await persistChatState();
+            renderContextStats();
+            renderLatestModules();
+            scheduleBackgroundMaintenance();
+        });
+    });
+}
+
+function splitUserMessageLines(text) {
+    return String(text == null ? '' : text)
+        .replace(/\r/g, '\n')
+        .split(/\n+/g)
+        .map((line) => line.trim())
+        .filter(Boolean);
+}
+
+function splitAssistantSentenceLine(line) {
+    const safeLine = String(line || '')
+        .replace(/^(\d+[\.\)、]\s*|[-*•]\s*)/, '')
+        .trim();
+    if (!safeLine) return [];
+
+    const sentenceReady = safeLine
+        .replace(/([。！？!?；;…]{1,2})(?=[^\s])/g, '$1\n');
+
+    return sentenceReady
+        .split(/\n+/g)
+        .map((part) => part.trim())
+        .filter(Boolean);
+}
+
+function normalizeAssistantReplyLines(text) {
+    const raw = String(text == null ? '' : text).replace(/\r/g, '\n').trim();
+    if (!raw) return [];
+    const result = [];
+    raw.split(/\n+/g).forEach((line) => {
+        const parts = splitAssistantSentenceLine(line);
+        if (parts.length > 0) {
+            result.push(...parts);
+        }
+    });
+    return result.length ? result : [raw];
+}
+
+function getTranscriptBatchId(item) {
+    return toTrimmedString(item?.batchId) || toTrimmedString(item?.id);
+}
+
+function trimTranscript() {
+    if (!runtime.chatState) return;
+    if (runtime.chatState.transcript.length > TRANSCRIPT_STORAGE_HARD_CAP) {
+        runtime.chatState.transcript = runtime.chatState.transcript.slice(-TRANSCRIPT_STORAGE_HARD_CAP);
+    }
+    if (runtime.selectedTranscriptIds instanceof Set) {
+        const existingIds = new Set(runtime.chatState.transcript.map((item) => String(item?.id || '')));
+        runtime.selectedTranscriptIds = new Set(
+            Array.from(runtime.selectedTranscriptIds).filter((id) => existingIds.has(id))
+        );
+        if (runtime.selectedTranscriptIds.size === 0) {
+            runtime.transcriptSelectionMode = false;
+        }
+    }
+}
+
+function appendTranscriptEntries(entries, options = {}) {
+    if (!runtime.chatState) runtime.chatState = createDefaultChatState();
+    const items = Array.isArray(entries)
+        ? entries.map((entry) => normalizeTranscriptEntry(entry)).filter(Boolean)
+        : [];
+    if (!items.length) return [];
+    runtime.chatState.transcript.push(...items);
+    trimTranscript();
+    if (options.persist !== false) {
+        void persistChatState();
+    }
+    if (options.sync !== false) {
+        scheduleCompanionRecentChatsSync();
+    }
+    return items;
+}
+
+function replaceTranscriptBatch(batchId, entries, options = {}) {
+    if (!runtime.chatState) runtime.chatState = createDefaultChatState();
+    const safeBatchId = toTrimmedString(batchId);
+    runtime.chatState.transcript = runtime.chatState.transcript.filter((item) => getTranscriptBatchId(item) !== safeBatchId);
+    appendTranscriptEntries(entries, { persist: false, sync: false });
+    trimTranscript();
+    if (options.persist !== false) {
+        void persistChatState();
+    }
+    if (options.sync !== false) {
+        scheduleCompanionRecentChatsSync();
+    }
+}
+
+function findLatestTranscriptBatch(role, beforeIndex = null) {
+    const transcript = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript : [];
+    const startIndex = Number.isFinite(Number(beforeIndex))
+        ? Math.min(transcript.length - 1, Number(beforeIndex) - 1)
+        : transcript.length - 1;
+    for (let index = startIndex; index >= 0; index -= 1) {
+        const item = transcript[index];
+        if (!item || item.pending) continue;
+        if (role && item.role !== role) continue;
+        const batchId = getTranscriptBatchId(item);
+        if (!batchId) continue;
+        let firstIndex = index;
+        while (firstIndex - 1 >= 0 && getTranscriptBatchId(transcript[firstIndex - 1]) === batchId) {
+            firstIndex -= 1;
+        }
+        const items = transcript.slice(firstIndex, index + 1).filter((entry) => getTranscriptBatchId(entry) === batchId);
+        return { batchId, firstIndex, lastIndex: index, items };
+    }
+    return null;
+}
+
+function isTranscriptEntrySelectable(item) {
+    return Boolean(item && !item.pending);
+}
+
+function updateTranscriptSelectionBar() {
+    if (!ui.selectBar || !ui.selectCount) return;
+    const selectedCount = runtime.selectedTranscriptIds instanceof Set ? runtime.selectedTranscriptIds.size : 0;
+    const active = Boolean(runtime.transcriptSelectionMode && selectedCount > 0);
+    ui.selectBar.classList.toggle('hidden', !active);
+    ui.selectCount.textContent = `已选 ${selectedCount} 条`;
+    if (ui.selectDeleteButton) {
+        ui.selectDeleteButton.disabled = selectedCount === 0;
+    }
+}
+
+function enterTranscriptSelectionMode(initialId = '') {
+    runtime.transcriptSelectionMode = true;
+    if (!(runtime.selectedTranscriptIds instanceof Set)) {
+        runtime.selectedTranscriptIds = new Set();
+    }
+    if (initialId) {
+        runtime.selectedTranscriptIds.add(initialId);
+    }
+    updateTranscriptSelectionBar();
+    renderTranscript();
+}
+
+function exitTranscriptSelectionMode() {
+    runtime.transcriptSelectionMode = false;
+    runtime.selectedTranscriptIds = new Set();
+    updateTranscriptSelectionBar();
+    renderTranscript();
+}
+
+function toggleTranscriptSelection(id) {
+    const safeId = toTrimmedString(id);
+    if (!safeId) return;
+    if (!(runtime.selectedTranscriptIds instanceof Set)) {
+        runtime.selectedTranscriptIds = new Set();
+    }
+    if (runtime.selectedTranscriptIds.has(safeId)) {
+        runtime.selectedTranscriptIds.delete(safeId);
+    } else {
+        runtime.selectedTranscriptIds.add(safeId);
+    }
+    if (runtime.selectedTranscriptIds.size === 0) {
+        runtime.transcriptSelectionMode = false;
+    }
+    updateTranscriptSelectionBar();
+    renderTranscript();
+}
+
+async function deleteSelectedTranscriptEntries() {
+    if (!(runtime.selectedTranscriptIds instanceof Set) || runtime.selectedTranscriptIds.size === 0) return;
+    const selectedIds = new Set(runtime.selectedTranscriptIds);
+    runtime.chatState.transcript = runtime.chatState.transcript.filter((item) => !selectedIds.has(String(item?.id || '')));
+    runtime.transcriptSelectionMode = false;
+    runtime.selectedTranscriptIds = new Set();
+    trimTranscript();
+    await persistChatState();
+    scheduleCompanionRecentChatsSync();
+    renderTranscript();
+}
+
+function loadMoreTranscriptMessages() {
+    runtime.transcriptRenderCount += TRANSCRIPT_RENDER_PAGE_SIZE;
+    renderTranscript();
+}
+
+function bindTranscriptBubbleEvents() {
+    if (!ui.transcriptRoot) return;
+    ui.transcriptRoot.querySelector('[data-load-more-transcript]')?.addEventListener('click', () => {
+        loadMoreTranscriptMessages();
+    });
+    ui.transcriptRoot.querySelectorAll('[data-transcript-id]').forEach((element) => {
+        const transcriptId = toTrimmedString(element.getAttribute('data-transcript-id'));
+        if (!transcriptId) return;
+        let longPressTimer = null;
+        let longPressTriggered = false;
+        const clearLongPress = () => {
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+        };
+        element.addEventListener('click', () => {
+            if (longPressTriggered) {
+                longPressTriggered = false;
+                return;
+            }
+            if (!runtime.transcriptSelectionMode) return;
+            toggleTranscriptSelection(transcriptId);
+        });
+        element.addEventListener('pointerdown', () => {
+            if (runtime.transcriptSelectionMode) return;
+            longPressTimer = setTimeout(() => {
+                longPressTriggered = true;
+                enterTranscriptSelectionMode(transcriptId);
+                longPressTimer = null;
+            }, 420);
+        });
+        element.addEventListener('pointerup', clearLongPress);
+        element.addEventListener('pointerleave', clearLongPress);
+        element.addEventListener('pointercancel', clearLongPress);
+        element.addEventListener('pointermove', clearLongPress);
+    });
+}
+
+function renderTranscript() {
+    if (!ui.transcriptRoot) return;
+    const transcript = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript : [];
+    const roleName = getActiveRoleName();
+    renderComposerState(roleName);
+    updateTranscriptSelectionBar();
+
+    if (transcript.length === 0) {
+        runtime.transcriptSelectionMode = false;
+        runtime.selectedTranscriptIds = new Set();
+        updateTranscriptSelectionBar();
+        ui.transcriptRoot.innerHTML = `<div class="idic-companion__empty">${roleName ? '还没有开始聊天' : '先选角色'}</div>`;
+        return;
+    }
+
+    const binding = ensureChatMeta()?.binding || createDefaultBinding();
+    const assistantName = binding.displayName || binding.charName || '陪读';
+    const renderCount = Math.max(TRANSCRIPT_RENDER_PAGE_SIZE, runtime.transcriptRenderCount || TRANSCRIPT_RENDER_PAGE_SIZE);
+    const startIndex = Math.max(0, transcript.length - renderCount);
+    const visibleItems = transcript.slice(startIndex);
+    const html = [];
+
+    if (startIndex > 0) {
+        html.push('<button type="button" class="idic-companion__load-more" data-load-more-transcript="1">更多消息</button>');
+    }
+
+    visibleItems.forEach((item) => {
+        const role = item.role;
+        const cls = role === 'user' ? 'user' : (role === 'assistant' ? 'assistant' : 'system');
+        const timestamp = new Date(item.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const speaker = role === 'user' ? '你' : (role === 'assistant' ? assistantName : '系统');
+        const selectable = isTranscriptEntrySelectable(item);
+        const selected = selectable && runtime.selectedTranscriptIds instanceof Set && runtime.selectedTranscriptIds.has(String(item.id));
+        html.push(`
+            <div class="idic-companion__bubble ${cls} ${selectable ? 'selectable' : ''} ${selected ? 'selected' : ''}" ${selectable ? `data-transcript-id="${escapeHtml(item.id)}"` : ''}>
+                ${selectable ? `<span class="idic-companion__bubble-check">${selected ? '✓' : ''}</span>` : ''}
+                <div class="idic-companion__bubble-box">${escapeHtml(item.text)}</div>
+                <div class="idic-companion__bubble-meta">${escapeHtml(speaker)} · ${escapeHtml(timestamp)}${item.pending ? ' · 发送中' : ''}</div>
+            </div>
+        `);
+    });
+
+    ui.transcriptRoot.innerHTML = html.join('');
+    bindTranscriptBubbleEvents();
+    if (ui.scrollRoot && !runtime.transcriptSelectionMode) {
+        ui.scrollRoot.scrollTop = ui.scrollRoot.scrollHeight;
+    }
+}
+
+function buildTranscriptPayload() {
+    const settings = ensureSettings();
+    const transcript = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript : [];
+    const batches = [];
+    transcript
+        .filter((item) => !item.pending && (item.role === 'user' || item.role === 'assistant'))
+        .forEach((item) => {
+            const batchId = getTranscriptBatchId(item);
+            const lastBatch = batches[batches.length - 1];
+            if (lastBatch && lastBatch.batchId === batchId && lastBatch.role === item.role) {
+                lastBatch.items.push(item);
+                return;
+            }
+            batches.push({
+                batchId,
+                role: item.role,
+                items: [item],
+            });
+        });
+
+    const maxBatches = Math.max(4, settings.maxTranscriptTurns * 2);
+    return batches
+        .slice(-maxBatches)
+        .flatMap((batch) => batch.items.map((item) => ({
+            role: item.role,
+            text: item.text,
+        })));
+}
+
+function buildCompanionRecentChatsPayload() {
+    const transcript = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript : [];
+    return transcript
+        .filter((item) => !item.pending && (item.role === 'user' || item.role === 'assistant'))
+        .slice(-COMPANION_RECENT_CHAT_LIMIT)
+        .map((item) => ({
+            id: item.id,
+            role: item.role,
+            content: item.text,
+            time: new Date(item.createdAt || Date.now()).toISOString(),
+            batchId: getTranscriptBatchId(item),
+            source: 'sillytavern_companion',
+            sourceLabel: '酒馆陪读',
+        }));
+}
+
+function scheduleCompanionRecentChatsSync(delayMs = 240) {
+    if (runtime.companionRecentChatsSyncTimer) {
+        clearTimeout(runtime.companionRecentChatsSyncTimer);
+    }
+    runtime.companionRecentChatsSyncTimer = setTimeout(() => {
+        runtime.companionRecentChatsSyncTimer = null;
+        void syncCompanionRecentChatsToSnapshot();
+    }, Math.max(120, Number(delayMs) || 240));
+}
+
+async function syncCompanionRecentChatsToSnapshot() {
+    const binding = getBindingPayload();
+    if (!binding.userId || !binding.charId) return;
+    try {
+        await callBridge('sync_companion_recent_chats', {
+            binding,
+            recentChats: buildCompanionRecentChatsPayload(),
+            stChatLabel: getCurrentChatLabel(),
+        });
+        window.dispatchEvent(new CustomEvent('idic-companion-recent-chats-updated', {
+            detail: {
+                charId: binding.charId,
+            },
+        }));
+    } catch (error) {
+        console.warn(`[${MODULE_NAME}] recent chat sync failed`, error);
+    }
+}
+
+async function sendCompanionMessage() {
+    if (runtime.sendInFlight) return;
+    const lines = splitUserMessageLines(ui.input?.value);
+    if (lines.length === 0) return;
+
+    await saveBindingFromSelection({ silent: true });
+    const binding = getBindingPayload();
+    if (!binding.charId || !binding.charName || (!binding.charPersona && !binding.promptProfile)) {
+        notify('请先选择角色', 'warning');
+        setPanelOpen(true);
+        return;
+    }
+
+    runtime.sendInFlight = true;
+    setStatus('正在整理上下文...', 'info');
+    await syncStateFromChat({ captureLatestStatus: true, forceLatestRescan: false });
+    await scheduleImmediateContextHydration();
+
+    const userBatchId = createId();
+    const pendingBatchId = createId();
+    const now = Date.now();
+    appendTranscriptEntries(lines.map((text, index) => ({
+        id: createId(),
+        role: 'user',
+        text,
+        createdAt: now + index,
+        batchId: userBatchId,
+        sourceType: 'companion',
+    })), { persist: false, sync: false });
+    appendTranscriptEntries([{
+        id: createId(),
+        role: 'assistant',
+        text: '...',
+        createdAt: now + lines.length + 1,
+        pending: true,
+        batchId: pendingBatchId,
+        sourceType: 'companion',
+    }], { persist: false, sync: false });
+    trimTranscript();
+    await persistChatState();
+    scheduleCompanionRecentChatsSync();
+    renderTranscript();
+    if (ui.input) ui.input.value = '';
+    setStatus('对方正在输入...', 'info');
+
+    try {
+        const response = await callBridge('reply', {
+            binding,
+            apiConfig: getApiConfigPayload(),
+            readingContext: buildReadingContextPayload(),
+            transcript: buildTranscriptPayload(),
+            userMessage: lines.join('\n'),
+            userMessages: lines,
+            stChatLabel: getCurrentChatLabel(),
+            replyControl: {
+                replyMode: 'normal',
+            },
+        });
+
+        const replyLines = normalizeAssistantReplyLines(toTrimmedString(response.reply) || '没有收到回复');
+        replaceTranscriptBatch(pendingBatchId, replyLines.map((text, index) => ({
+            id: createId(),
+            role: 'assistant',
+            text,
+            createdAt: Date.now() + index,
+            batchId: pendingBatchId,
+            sourceType: 'companion',
+        })));
+        await persistChatState();
+        scheduleCompanionRecentChatsSync();
+        renderTranscript();
+        setStatus(`已回复，命中 ${Number(response.memoryCount || 0)} 条海马体记忆`, 'success');
+    } catch (error) {
+        replaceTranscriptBatch(pendingBatchId, [{
+            id: createId(),
+            role: 'system',
+            text: `连接失败：${error.message}`,
+            createdAt: Date.now(),
+            batchId: pendingBatchId,
+            sourceType: 'system',
+        }]);
+        await persistChatState();
+        scheduleCompanionRecentChatsSync();
+        renderTranscript();
+        setStatus(`连接失败：${error.message}`, 'error');
+    } finally {
+        runtime.sendInFlight = false;
+        renderBinding();
+    }
+}
+
+async function regenerateCompanionReply() {
+    if (runtime.sendInFlight) return;
+    const transcriptSnapshot = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript.slice() : [];
+    const lastAssistantBatch = findLatestTranscriptBatch('assistant');
+    const lastUserBatch = lastAssistantBatch
+        ? findLatestTranscriptBatch('user', lastAssistantBatch.firstIndex)
+        : findLatestTranscriptBatch('user');
+    if (!lastUserBatch) {
+        notify('还没有可重写的上一轮', 'info');
+        return;
+    }
+
+    if (lastAssistantBatch) {
+        runtime.chatState.transcript = runtime.chatState.transcript.filter((item) => getTranscriptBatchId(item) !== lastAssistantBatch.batchId);
+        await persistChatState();
+        scheduleCompanionRecentChatsSync();
+        renderTranscript();
+    }
+
+    await sendBridgeReply({
+        userMessage: lastUserBatch.items.map((item) => item.text).join('\n'),
+        userMessages: lastUserBatch.items.map((item) => item.text),
+        replyMode: 'regenerate',
+        statusLabel: '正在重写...',
+    }).catch(async (error) => {
+        runtime.chatState.transcript = transcriptSnapshot;
+        await persistChatState();
+        scheduleCompanionRecentChatsSync();
+        renderTranscript();
+        throw error;
+    });
+}
+
+async function continueCompanionReply() {
+    if (runtime.sendInFlight) return;
+    const lastAssistantBatch = findLatestTranscriptBatch('assistant');
+    if (!lastAssistantBatch || lastAssistantBatch.items.length === 0) {
+        notify('还没有可续写的回复', 'info');
+        return;
+    }
+
+    await sendBridgeReply({
+        userMessage: '',
+        userMessages: [],
+        replyMode: 'continue',
+        continueFrom: lastAssistantBatch.items.map((item) => item.text).join('\n'),
+        statusLabel: '正在续写...',
+    });
+}
+
+async function sendBridgeReply(options) {
+    await saveBindingFromSelection({ silent: true });
+    const binding = getBindingPayload();
+    if (!binding.charId || !binding.charName || (!binding.charPersona && !binding.promptProfile)) {
+        notify('请先选择角色', 'warning');
+        return;
+    }
+
+    runtime.sendInFlight = true;
+    await syncStateFromChat({ captureLatestStatus: true, forceLatestRescan: false });
+    await scheduleImmediateContextHydration();
+
+    const pendingBatchId = createId();
+    appendTranscriptEntries([{
+        id: createId(),
+        role: 'assistant',
+        text: '...',
+        createdAt: Date.now(),
+        pending: true,
+        batchId: pendingBatchId,
+        sourceType: 'companion',
+    }], { persist: false, sync: false });
+    await persistChatState();
+    renderTranscript();
+    setStatus(options.statusLabel || '对方正在输入...', 'info');
+
+    try {
+        const response = await callBridge('reply', {
+            binding,
+            apiConfig: getApiConfigPayload(),
+            readingContext: buildReadingContextPayload(),
+            transcript: buildTranscriptPayload(),
+            userMessage: toTrimmedString(options.userMessage),
+            userMessages: Array.isArray(options.userMessages) ? options.userMessages : [],
+            stChatLabel: getCurrentChatLabel(),
+            replyControl: {
+                replyMode: options.replyMode || 'normal',
+                continueFrom: toTrimmedString(options.continueFrom),
+            },
+        });
+
+        const replyLines = normalizeAssistantReplyLines(toTrimmedString(response.reply) || '没有收到回复');
+        replaceTranscriptBatch(pendingBatchId, replyLines.map((text, index) => ({
+            id: createId(),
+            role: 'assistant',
+            text,
+            createdAt: Date.now() + index,
+            batchId: pendingBatchId,
+            sourceType: 'companion',
+        })));
+        await persistChatState();
+        scheduleCompanionRecentChatsSync();
+        renderTranscript();
+        setStatus(`已回复，命中 ${Number(response.memoryCount || 0)} 条海马体记忆`, 'success');
+    } catch (error) {
+        replaceTranscriptBatch(pendingBatchId, [{
+            id: createId(),
+            role: 'system',
+            text: `连接失败：${error.message}`,
+            createdAt: Date.now(),
+            batchId: pendingBatchId,
+            sourceType: 'system',
+        }]);
+        await persistChatState();
+        scheduleCompanionRecentChatsSync();
+        renderTranscript();
+        setStatus(`连接失败：${error.message}`, 'error');
+        throw error;
+    } finally {
+        runtime.sendInFlight = false;
+        renderBinding();
+    }
 }
