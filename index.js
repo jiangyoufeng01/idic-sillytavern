@@ -62,17 +62,30 @@ const runtime = {
 
 const ui = {};
 
-void bootstrap().catch((error) => {
-    console.error(`[${MODULE_NAME}] bootstrap failed`, error);
-    notify('IDIC陪读窗加载失败，请刷新页面后重试', 'error');
-});
+let bootstrapPromise = null;
+
+function startBootstrap(reason = 'module') {
+    if (!bootstrapPromise) {
+        bootstrapPromise = bootstrap().catch((error) => {
+            console.error(`[${MODULE_NAME}] bootstrap failed from ${reason}`, error);
+            notify('IDIC陪读窗加载失败，请刷新页面后重试', 'error');
+        });
+    }
+    return bootstrapPromise;
+}
+
+void startBootstrap('module');
+
+export async function onActivate() {
+    await startBootstrap('activate');
+}
 
 function getFallbackSettingsMarkup() {
     return `
         <div class="idic-companion-settings">
             <div class="inline-drawer">
                 <div class="inline-drawer-toggle inline-drawer-header">
-                    <b>酒馆助手</b>
+                    <b>IDIC 陪读窗</b>
                     <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
                 </div>
                 <div class="inline-drawer-content">
@@ -143,11 +156,19 @@ function getFallbackSettingsMarkup() {
 }
 
 async function bootstrap() {
-    await waitForSettingsContainer();
-    await loadSillyTavernContextApi();
-    await mountSettings();
+    await waitForDocumentBody();
     mountPanel();
+    void loadSillyTavernContextApi();
+    void mountSettingsWhenReady();
     await initializeWhenContextReady();
+}
+
+async function waitForDocumentBody() {
+    const startedAt = Date.now();
+    while (!document.body) {
+        if (Date.now() - startedAt > 10_000) return;
+        await delay(100);
+    }
 }
 
 async function initializeWhenContextReady() {
@@ -178,6 +199,11 @@ async function waitForSettingsContainer() {
         await delay(150);
     }
     return getSettingsContainer();
+}
+
+async function mountSettingsWhenReady() {
+    await waitForSettingsContainer();
+    await mountSettings();
 }
 
 async function waitForSillyTavern() {
@@ -490,17 +516,7 @@ async function persistChatState() {
 async function mountSettings() {
     const container = document.querySelector('#extensions_settings2') || document.querySelector('#extensions_settings');
     if (!container) return;
-    let html = '';
-    try {
-        const response = await fetch(new URL('settings.html', import.meta.url));
-        if (!response.ok) {
-            throw new Error(`settings_html_http_${response.status}`);
-        }
-        html = await response.text();
-    } catch (error) {
-        console.warn(`[${MODULE_NAME}] settings.html load failed, using fallback markup`, error);
-        html = getFallbackSettingsMarkup();
-    }
+    const html = getFallbackSettingsMarkup();
     const root = document.createElement('div');
     root.innerHTML = html;
     runtime.settingsRoot = root.firstElementChild;
