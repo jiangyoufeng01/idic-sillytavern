@@ -133,6 +133,10 @@ async function handleListRoles() {
                 relationshipHint: trim(snapshot.relationshipHint),
                 systemPrompt: trim(snapshot.systemPrompt),
                 promptProfile: trim(snapshot.promptProfile),
+                chatStyle: trim(snapshot.chatStyle),
+                worldBookText: trim(snapshot.worldBookText),
+                worldBookEntries: normalizeWorldBookEntries(snapshot.worldBookEntries),
+                stickerList: normalizeStickerList(snapshot.stickerList),
                 hippocampusEnabled: toBoolean(row.hippocampus_enabled ?? snapshot.hippocampusEnabled),
                 updatedAt,
             },
@@ -438,12 +442,20 @@ function normalizeStringArray(value: unknown) {
     return (Array.isArray(value) ? value : []).map((item) => trim(item)).filter(Boolean);
 }
 
+function normalizeWorldBookEntries(value: unknown) {
+    return arrayOfObjects(value).map((item, index) => ({
+        key: trim(item.key || item.name || item.title || `world_${index + 1}`),
+        value: trim(item.value || item.content || item.text),
+    })).filter((item) => item.key && item.value).slice(0, 80);
+}
+
 function normalizeStickerList(value: unknown) {
     return arrayOfObjects(value).map((item) => ({
         id: trim(item.id || item.stickerId),
         aiId: trim(item.aiId || item.ai_id || item.id || item.stickerId),
         desc: trim(item.desc || item.description || item.text || item.name),
         groupName: trim(item.groupName || item.group_name || item.group),
+        imageDataUrl: trim(item.imageDataUrl || item.image_data_url || item.image || item.url),
     })).filter((item) => item.id && item.aiId && item.desc).slice(0, 80);
 }
 

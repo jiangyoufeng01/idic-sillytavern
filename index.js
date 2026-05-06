@@ -334,6 +334,7 @@ function createDefaultChatState() {
         turns: {},
         stageSummaries: [],
         transcript: [],
+        roleTranscripts: {},
         modulePreferences: {},
         chatSignature: '',
         updatedAt: 0,
@@ -382,6 +383,7 @@ async function loadCurrentChatState(options = {}) {
     const localforage = getLib('localforage');
     const loaded = localforage ? await localforage.getItem(storageKey) : null;
     runtime.chatState = normalizeChatState(loaded);
+    activateTranscriptForRole(toTrimmedString(meta.binding?.selectedRoleId || meta.binding?.charId), { migrateLegacy: true, resetRender: false });
     runtime.transcriptRenderCount = TRANSCRIPT_RENDER_PAGE_SIZE;
     runtime.transcriptSelectionMode = false;
     runtime.selectedTranscriptIds = new Set();
@@ -400,11 +402,21 @@ function normalizeChatState(value) {
     Object.keys(turns).forEach((turnId) => {
         normalizedTurns[turnId] = normalizeTurnEntry(turns[turnId], turnId);
     });
+    const roleTranscripts = {};
+    const sourceRoleTranscripts = source.roleTranscripts && typeof source.roleTranscripts === 'object'
+        ? source.roleTranscripts
+        : {};
+    Object.keys(sourceRoleTranscripts).forEach((roleId) => {
+        const safeRoleId = toTrimmedString(roleId);
+        if (!safeRoleId || !Array.isArray(sourceRoleTranscripts[roleId])) return;
+        roleTranscripts[safeRoleId] = sourceRoleTranscripts[roleId].map(normalizeTranscriptEntry).filter(Boolean);
+    });
     return Object.assign(createDefaultChatState(), source, {
         turnOrder: Array.isArray(source.turnOrder) ? source.turnOrder.map((item) => String(item)).filter(Boolean) : [],
         turns: normalizedTurns,
         stageSummaries: Array.isArray(source.stageSummaries) ? source.stageSummaries.map(normalizeStageSummary).filter(Boolean) : [],
         transcript: Array.isArray(source.transcript) ? source.transcript.map(normalizeTranscriptEntry).filter(Boolean) : [],
+        roleTranscripts,
         modulePreferences: source.modulePreferences && typeof source.modulePreferences === 'object'
             ? Object.assign({}, source.modulePreferences)
             : {},
@@ -509,10 +521,54 @@ function normalizeTranscriptEntry(value) {
     };
 }
 
+function getBoundRoleId() {
+    const binding = ensureChatMeta()?.binding || createDefaultBinding();
+    return toTrimmedString(binding.selectedRoleId || binding.charId);
+}
+
+function ensureRoleTranscriptStore() {
+    if (!runtime.chatState) runtime.chatState = createDefaultChatState();
+    if (!runtime.chatState.roleTranscripts || typeof runtime.chatState.roleTranscripts !== 'object') {
+        runtime.chatState.roleTranscripts = {};
+    }
+    return runtime.chatState.roleTranscripts;
+}
+
+function storeActiveTranscriptForRole(roleId = getBoundRoleId()) {
+    if (!runtime.chatState) return;
+    const safeRoleId = toTrimmedString(roleId);
+    if (!safeRoleId) return;
+    const store = ensureRoleTranscriptStore();
+    store[safeRoleId] = Array.isArray(runtime.chatState.transcript)
+        ? runtime.chatState.transcript.map(normalizeTranscriptEntry).filter(Boolean)
+        : [];
+}
+
+function activateTranscriptForRole(roleId, options = {}) {
+    if (!runtime.chatState) runtime.chatState = createDefaultChatState();
+    const safeRoleId = toTrimmedString(roleId);
+    const store = ensureRoleTranscriptStore();
+    const currentTranscript = Array.isArray(runtime.chatState.transcript)
+        ? runtime.chatState.transcript.map(normalizeTranscriptEntry).filter(Boolean)
+        : [];
+    if (safeRoleId && options.migrateLegacy && !Array.isArray(store[safeRoleId]) && currentTranscript.length > 0) {
+        store[safeRoleId] = currentTranscript;
+    }
+    runtime.chatState.transcript = safeRoleId && Array.isArray(store[safeRoleId])
+        ? store[safeRoleId].map(normalizeTranscriptEntry).filter(Boolean)
+        : [];
+    if (options.resetRender !== false) {
+        runtime.transcriptRenderCount = TRANSCRIPT_RENDER_PAGE_SIZE;
+        runtime.transcriptSelectionMode = false;
+        runtime.selectedTranscriptIds = new Set();
+    }
+}
+
 async function persistChatState() {
     if (!runtime.activeStateKey) return;
     const localforage = getLib('localforage');
     if (!localforage || typeof localforage.setItem !== 'function') return;
+    storeActiveTranscriptForRole();
     runtime.chatState.updatedAt = Date.now();
     await localforage.setItem(runtime.activeStateKey, runtime.chatState);
 }
@@ -683,6 +739,7 @@ function mountPanel() {
                         <button id="idic-companion-regenerate" class="idic-companion__mini-btn" type="button">重写</button>
                         <button id="idic-companion-continue" class="idic-companion__mini-btn" type="button">续写</button>
                         <button id="idic-companion-open-stickers" class="idic-companion__mini-btn" type="button">表情</button>
+                        <button id="idic-companion-clear-transcript" class="idic-companion__mini-btn danger" type="button">清空</button>
                         <span id="idic-companion-footer-status" class="idic-companion__status">待命</span>
                     </div>
                     <div id="idic-companion-staged-lines" class="idic-companion__staged-lines hidden"></div>
@@ -767,6 +824,7 @@ function mountPanel() {
     ui.roleSelect = getPanelElement('idic-companion-role-select');
     ui.regenerateButton = getPanelElement('idic-companion-regenerate');
     ui.continueButton = getPanelElement('idic-companion-continue');
+    ui.clearTranscriptButton = getPanelElement('idic-companion-clear-transcript');
     ui.openWorldBooksButton = getPanelElement('idic-companion-open-worldbooks');
     ui.worldBookSheet = getPanelElement('idic-companion-worldbook-sheet');
     ui.worldBookMask = getPanelElement('idic-companion-worldbook-mask');
@@ -793,12 +851,16 @@ function mountPanel() {
         void fetchRoleOptions({ force: true, announce: true });
     });
     ui.roleSelect?.addEventListener('change', async () => {
+        await persistChatState();
         clearComposerDraft({ keepFocus: false });
-        renderBinding();
         if (toTrimmedString(ui.roleSelect?.value)) {
             await saveBindingFromSelection({ silent: true });
             setStatus('角色已切换', 'success');
+        } else {
+            activateTranscriptForRole('', { resetRender: true });
+            renderBinding();
         }
+        renderTranscript();
     });
     ui.openSyncSheetButton?.addEventListener('click', () => {
         setSyncSheetOpen(true);
@@ -829,6 +891,9 @@ function mountPanel() {
     });
     ui.continueButton?.addEventListener('click', () => {
         void continueCompanionReply();
+    });
+    ui.clearTranscriptButton?.addEventListener('click', () => {
+        void clearCurrentRoleTranscript();
     });
     ui.input?.addEventListener('input', () => {
         renderComposerState(getActiveRoleName());
@@ -1992,6 +2057,7 @@ async function saveBindingFromSelection(options = {}) {
     });
     if (!meta.binding.sessionId) meta.binding.sessionId = createId();
     getContext().chatMetadata[MODULE_NAME] = meta;
+    activateTranscriptForRole(meta.binding.charId || meta.binding.selectedRoleId, { resetRender: true });
     await saveChatMeta();
     renderBinding();
     if (!options.silent) {
@@ -2051,6 +2117,10 @@ function renderBinding() {
     if (ui.openSyncSheetButton) ui.openSyncSheetButton.disabled = !roleName || runtime.sendInFlight;
     if (ui.openWorldBooksButton) ui.openWorldBooksButton.disabled = !roleName || getRoleWorldBookEntries().length === 0;
     if (ui.openStickersButton) ui.openStickersButton.disabled = !roleName || getAvailableStickers().length === 0 || runtime.sendInFlight;
+    if (ui.clearTranscriptButton) {
+        const transcript = Array.isArray(runtime.chatState?.transcript) ? runtime.chatState.transcript : [];
+        ui.clearTranscriptButton.disabled = !roleName || runtime.sendInFlight || transcript.length === 0;
+    }
 }
 
 function renderComposerState(roleName = '') {
@@ -2062,6 +2132,7 @@ function renderComposerState(roleName = '') {
     if (ui.sendButton) ui.sendButton.disabled = baseDisabled || !hasDraft;
     if (ui.regenerateButton) ui.regenerateButton.disabled = baseDisabled || !hasUserTurn;
     if (ui.continueButton) ui.continueButton.disabled = baseDisabled || !hasAssistantTurn;
+    if (ui.clearTranscriptButton) ui.clearTranscriptButton.disabled = baseDisabled || transcript.length === 0;
     renderStagedComposerLines();
 }
 
@@ -3796,6 +3867,27 @@ async function editSelectedTranscriptEntry() {
     await persistChatState();
     scheduleCompanionRecentChatsSync();
     renderTranscript();
+}
+
+async function clearCurrentRoleTranscript() {
+    if (runtime.sendInFlight) return;
+    const roleId = getBoundRoleId();
+    const roleName = getActiveRoleName();
+    if (!roleId || !runtime.chatState) return;
+    const transcript = Array.isArray(runtime.chatState.transcript) ? runtime.chatState.transcript : [];
+    if (transcript.length === 0) return;
+    const confirmed = window.confirm(`清空 ${roleName || '当前角色'} 的陪读聊天记录？`);
+    if (!confirmed) return;
+    const store = ensureRoleTranscriptStore();
+    store[roleId] = [];
+    runtime.chatState.transcript = [];
+    runtime.transcriptSelectionMode = false;
+    runtime.selectedTranscriptIds = new Set();
+    clearComposerDraft({ keepFocus: false, render: false });
+    await persistChatState();
+    scheduleCompanionRecentChatsSync();
+    renderTranscript();
+    setStatus('已清空', 'success');
 }
 
 function loadMoreTranscriptMessages() {
