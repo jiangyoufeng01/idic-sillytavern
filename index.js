@@ -5,6 +5,8 @@ const TRANSCRIPT_RENDER_PAGE_SIZE = 50;
 const TRANSCRIPT_STORAGE_HARD_CAP = 400;
 const COMPANION_RECENT_CHAT_LIMIT = 50;
 const MODULE_SYNC_MODES = ['content', 'summary', 'fast', 'ignore'];
+const STICKER_TRANSCRIPT_TYPE = 'sticker';
+const WORLD_BOOK_NONE_SENTINEL = '__none__';
 const DISCARD_TAGS = Object.freeze(['thinking', 'thought', 'reasoning', 'cot', 'analysis', 'chain-of-thought', 'tool', 'script']);
 const CHAT_SYNC_DEFER_MS = 2200;
 const CHAT_SYNC_SCAN_WINDOW_TURNS = 2;
@@ -67,6 +69,8 @@ const runtime = {
     transcriptRenderCount: TRANSCRIPT_RENDER_PAGE_SIZE,
     transcriptSelectionMode: false,
     selectedTranscriptIds: new Set(),
+    moduleTagFilter: '',
+    stagedUserLines: [],
 };
 
 const ui = {};
@@ -319,6 +323,7 @@ function createDefaultBinding() {
         promptProfile: '',
         hippocampusEnabled: false,
         snapshotUpdatedAt: '',
+        mountedWorldBookKeys: [],
     };
 }
 
@@ -344,6 +349,7 @@ function ensureChatMeta() {
     const binding = current.binding && typeof current.binding === 'object'
         ? Object.assign(createDefaultBinding(), current.binding)
         : createDefaultBinding();
+    binding.mountedWorldBookKeys = normalizeStringList(binding.mountedWorldBookKeys);
     const normalized = {
         version: 1,
         stateId: toTrimmedString(current.stateId) || createId(),
@@ -379,6 +385,8 @@ async function loadCurrentChatState(options = {}) {
     runtime.transcriptRenderCount = TRANSCRIPT_RENDER_PAGE_SIZE;
     runtime.transcriptSelectionMode = false;
     runtime.selectedTranscriptIds = new Set();
+    runtime.moduleTagFilter = '';
+    runtime.stagedUserLines = [];
     if (!options || options.skipChatSync !== true) {
         await syncStateFromChat(options.syncOptions || { captureLatestStatus: false, forceLatestRescan: false });
     }
@@ -483,6 +491,7 @@ function normalizeTranscriptEntry(value) {
     if (!source) return null;
     const text = clipText(source.text, STORED_TURN_TEXT_LIMIT);
     if (!text) return null;
+    const messageType = toTrimmedString(source.messageType || source.type);
     return {
         id: toTrimmedString(source.id) || createId(),
         role: ['user', 'assistant', 'system'].includes(String(source.role)) ? String(source.role) : 'system',
@@ -492,6 +501,11 @@ function normalizeTranscriptEntry(value) {
         batchId: toTrimmedString(source.batchId),
         sourceType: toTrimmedString(source.sourceType),
         sourceTag: toTrimmedString(source.sourceTag),
+        messageType: messageType === STICKER_TRANSCRIPT_TYPE ? STICKER_TRANSCRIPT_TYPE : 'text',
+        stickerId: toTrimmedString(source.stickerId),
+        stickerAiId: toTrimmedString(source.stickerAiId),
+        stickerDesc: toTrimmedString(source.stickerDesc),
+        stickerImage: toTrimmedString(source.stickerImage),
     };
 }
 
@@ -646,11 +660,13 @@ function mountPanel() {
                     <option value="">选择角色</option>
                 </select>
                 <button id="idic-companion-refresh-roles" class="idic-companion__mini-btn" type="button">刷新</button>
+                <button id="idic-companion-open-worldbooks" class="idic-companion__mini-btn" type="button">世界书</button>
                 <button id="idic-companion-open-sync-sheet" class="idic-companion__mini-btn accent" type="button">同步</button>
             </div>
             <div id="idic-companion-selectbar" class="idic-companion__selectbar hidden">
                 <span id="idic-companion-select-count" class="idic-companion__select-count">已选 0 条</span>
                 <div class="idic-companion__select-actions">
+                    <button id="idic-companion-select-edit" class="idic-companion__mini-btn" type="button">编辑</button>
                     <button id="idic-companion-select-delete" class="idic-companion__mini-btn danger" type="button">删除</button>
                     <button id="idic-companion-select-cancel" class="idic-companion__mini-btn" type="button">取消</button>
                 </div>
@@ -666,8 +682,10 @@ function mountPanel() {
                     <div class="idic-companion__quick-actions">
                         <button id="idic-companion-regenerate" class="idic-companion__mini-btn" type="button">重写</button>
                         <button id="idic-companion-continue" class="idic-companion__mini-btn" type="button">续写</button>
+                        <button id="idic-companion-open-stickers" class="idic-companion__mini-btn" type="button">表情</button>
                         <span id="idic-companion-footer-status" class="idic-companion__status">待命</span>
                     </div>
+                    <div id="idic-companion-staged-lines" class="idic-companion__staged-lines hidden"></div>
                     <div class="idic-companion__composer-row">
                         <textarea id="idic-companion-input" placeholder="聊聊这段剧情"></textarea>
                         <button id="idic-companion-send" class="idic-companion__send-btn" type="button">发送</button>
@@ -684,6 +702,30 @@ function mountPanel() {
                         <div id="idic-companion-context-chips" class="idic-companion__chips"></div>
                         <div id="idic-companion-modules" class="idic-companion__modules">
                             <div class="idic-companion__empty">暂无内容</div>
+                        </div>
+                    </div>
+                </div>
+                <div id="idic-companion-worldbook-sheet" class="idic-companion__sheet hidden">
+                    <div id="idic-companion-worldbook-mask" class="idic-companion__sheet-mask"></div>
+                    <div class="idic-companion__sheet-card">
+                        <div class="idic-companion__sheet-header">
+                            <strong>挂载世界书</strong>
+                            <button id="idic-companion-close-worldbooks" class="idic-companion__mini-btn" type="button">完成</button>
+                        </div>
+                        <div id="idic-companion-worldbooks" class="idic-companion__worldbooks">
+                            <div class="idic-companion__empty">这个角色没有世界书</div>
+                        </div>
+                    </div>
+                </div>
+                <div id="idic-companion-sticker-sheet" class="idic-companion__sheet hidden">
+                    <div id="idic-companion-sticker-mask" class="idic-companion__sheet-mask"></div>
+                    <div class="idic-companion__sheet-card">
+                        <div class="idic-companion__sheet-header">
+                            <strong>发送表情</strong>
+                            <button id="idic-companion-close-stickers" class="idic-companion__mini-btn" type="button">关闭</button>
+                        </div>
+                        <div id="idic-companion-stickers" class="idic-companion__stickers">
+                            <div class="idic-companion__empty">这个角色没有表情包</div>
                         </div>
                     </div>
                 </div>
@@ -710,6 +752,7 @@ function mountPanel() {
     ui.footerStatus = getPanelElement('idic-companion-footer-status');
     ui.selectBar = getPanelElement('idic-companion-selectbar');
     ui.selectCount = getPanelElement('idic-companion-select-count');
+    ui.selectEditButton = getPanelElement('idic-companion-select-edit');
     ui.selectDeleteButton = getPanelElement('idic-companion-select-delete');
     ui.selectCancelButton = getPanelElement('idic-companion-select-cancel');
     ui.closeButton = getPanelElement('idic-companion-close');
@@ -718,11 +761,22 @@ function mountPanel() {
     ui.scrollRoot = getPanelElement('idic-companion-scroll');
     ui.transcriptRoot = getPanelElement('idic-companion-transcript');
     ui.input = getPanelElement('idic-companion-input');
+    ui.stagedLinesRoot = getPanelElement('idic-companion-staged-lines');
     ui.sendButton = getPanelElement('idic-companion-send');
     ui.refreshRolesButton = getPanelElement('idic-companion-refresh-roles');
     ui.roleSelect = getPanelElement('idic-companion-role-select');
     ui.regenerateButton = getPanelElement('idic-companion-regenerate');
     ui.continueButton = getPanelElement('idic-companion-continue');
+    ui.openWorldBooksButton = getPanelElement('idic-companion-open-worldbooks');
+    ui.worldBookSheet = getPanelElement('idic-companion-worldbook-sheet');
+    ui.worldBookMask = getPanelElement('idic-companion-worldbook-mask');
+    ui.closeWorldBooksButton = getPanelElement('idic-companion-close-worldbooks');
+    ui.worldBooksRoot = getPanelElement('idic-companion-worldbooks');
+    ui.openStickersButton = getPanelElement('idic-companion-open-stickers');
+    ui.stickerSheet = getPanelElement('idic-companion-sticker-sheet');
+    ui.stickerMask = getPanelElement('idic-companion-sticker-mask');
+    ui.closeStickersButton = getPanelElement('idic-companion-close-stickers');
+    ui.stickersRoot = getPanelElement('idic-companion-stickers');
     ui.openSyncSheetButton = getPanelElement('idic-companion-open-sync-sheet');
     ui.syncSheet = getPanelElement('idic-companion-sync-sheet');
     ui.syncSheetMask = getPanelElement('idic-companion-sync-sheet-mask');
@@ -739,6 +793,7 @@ function mountPanel() {
         void fetchRoleOptions({ force: true, announce: true });
     });
     ui.roleSelect?.addEventListener('change', async () => {
+        clearComposerDraft({ keepFocus: false });
         renderBinding();
         if (toTrimmedString(ui.roleSelect?.value)) {
             await saveBindingFromSelection({ silent: true });
@@ -751,6 +806,15 @@ function mountPanel() {
     });
     ui.closeSyncSheetButton?.addEventListener('click', () => setSyncSheetOpen(false));
     ui.syncSheetMask?.addEventListener('click', () => setSyncSheetOpen(false));
+    ui.openWorldBooksButton?.addEventListener('click', () => setWorldBookSheetOpen(true));
+    ui.closeWorldBooksButton?.addEventListener('click', () => setWorldBookSheetOpen(false));
+    ui.worldBookMask?.addEventListener('click', () => setWorldBookSheetOpen(false));
+    ui.openStickersButton?.addEventListener('click', () => setStickerSheetOpen(true));
+    ui.closeStickersButton?.addEventListener('click', () => setStickerSheetOpen(false));
+    ui.stickerMask?.addEventListener('click', () => setStickerSheetOpen(false));
+    ui.selectEditButton?.addEventListener('click', () => {
+        void editSelectedTranscriptEntry();
+    });
     ui.selectDeleteButton?.addEventListener('click', () => {
         void deleteSelectedTranscriptEntries();
     });
@@ -766,8 +830,14 @@ function mountPanel() {
     ui.continueButton?.addEventListener('click', () => {
         void continueCompanionReply();
     });
+    ui.input?.addEventListener('input', () => {
+        renderComposerState(getActiveRoleName());
+    });
     ui.input?.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' && !event.shiftKey) return;
+        if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+            event.preventDefault();
+            stageCurrentComposerInput();
+        }
     });
     window.addEventListener('resize', applyFloatingLayout);
 }
@@ -1114,6 +1184,47 @@ function getCompanionPanelCss() {
             color: #7a8396;
             font-size: 12px;
         }
+        .idic-companion__staged-lines {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 96px;
+            overflow-y: auto;
+            padding: 2px 0;
+        }
+        .idic-companion__staged-line {
+            align-self: flex-end;
+            display: flex;
+            align-items: flex-start;
+            gap: 6px;
+            max-width: 92%;
+            padding: 8px 8px 8px 10px;
+            border-radius: 14px 14px 5px 14px;
+            background: #e8f7cf;
+            color: #1f2937;
+            font-size: 13px;
+            line-height: 1.45;
+            box-shadow: 0 3px 10px rgba(15, 23, 42, 0.06);
+        }
+        .idic-companion__staged-text {
+            min-width: 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .idic-companion__staged-remove {
+            flex: 0 0 auto;
+            width: 22px;
+            height: 22px;
+            border: 0;
+            border-radius: 999px;
+            background: rgba(31, 41, 55, 0.08);
+            color: #4b5563;
+            font-size: 12px;
+            font-weight: 700;
+            line-height: 22px;
+            padding: 0;
+            cursor: pointer;
+        }
         .idic-companion__composer-row {
             display: flex;
             align-items: flex-end;
@@ -1289,6 +1400,118 @@ function getCompanionPanelCss() {
             border-radius: 12px;
             background: rgba(255, 255, 255, 0.78);
         }
+        .idic-companion__tag-filter {
+            display: flex;
+            gap: 6px;
+            overflow-x: auto;
+            padding: 2px 0 6px;
+        }
+        .idic-companion__tag-filter-btn {
+            flex: 0 0 auto;
+            height: 30px;
+            border: 0;
+            border-radius: 999px;
+            padding: 0 10px;
+            background: rgba(255, 255, 255, 0.92);
+            color: #64748b;
+            font-size: 12px;
+            font-weight: 700;
+            box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+        }
+        .idic-companion__tag-filter-btn.active {
+            background: #2f7ff2;
+            color: #fff;
+        }
+        .idic-companion__module-apply-row {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin: 0 0 8px;
+        }
+        .idic-companion__module-apply-row .idic-companion__mini-btn {
+            height: 26px;
+            font-size: 11px;
+        }
+        .idic-companion__worldbooks,
+        .idic-companion__stickers {
+            min-height: 0;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .idic-companion__worldbook-row {
+            display: flex;
+            gap: 8px;
+            align-items: flex-start;
+            padding: 10px;
+            border-radius: 14px;
+            background: #f7f8fc;
+            border: 1px solid rgba(99, 115, 145, 0.1);
+            color: #111827;
+            font-size: 13px;
+            line-height: 1.45;
+        }
+        .idic-companion__worldbook-row input {
+            margin-top: 3px;
+            flex: 0 0 auto;
+        }
+        .idic-companion__worldbook-name {
+            font-weight: 700;
+            margin-bottom: 3px;
+        }
+        .idic-companion__worldbook-preview {
+            color: #64748b;
+            word-break: break-word;
+        }
+        .idic-companion__stickers {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            align-content: start;
+        }
+        .idic-companion__sticker-btn {
+            min-height: 92px;
+            border: 1px solid rgba(99, 115, 145, 0.1);
+            border-radius: 14px;
+            background: #f7f8fc;
+            color: #334155;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 8px;
+            font-size: 11px;
+            line-height: 1.25;
+        }
+        .idic-companion__sticker-btn img,
+        .idic-companion__bubble-sticker img {
+            display: block;
+            max-width: 76px;
+            max-height: 76px;
+            object-fit: contain;
+            border-radius: 10px;
+        }
+        .idic-companion__sticker-fallback {
+            width: 56px;
+            height: 56px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #ffecd2, #fcb69f);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+        }
+        .idic-companion__bubble-sticker {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 5px;
+        }
+        .idic-companion__bubble-sticker-label {
+            color: #64748b;
+            font-size: 12px;
+        }
         @media (min-width: 901px) {
             #idic-companion-launcher {
                 right: 12px;
@@ -1444,6 +1667,8 @@ function setPanelOpen(open) {
     }
     if (!runtime.panelOpen) {
         setSyncSheetOpen(false);
+        setWorldBookSheetOpen(false);
+        setStickerSheetOpen(false);
     } else {
         window.requestAnimationFrame(() => {
             if (ui.scrollRoot) ui.scrollRoot.scrollTop = ui.scrollRoot.scrollHeight;
@@ -1454,12 +1679,114 @@ function setPanelOpen(open) {
 function setSyncSheetOpen(open) {
     if (!ui.syncSheet) return;
     ui.syncSheet.classList.toggle('hidden', !open);
+    if (open) renderLatestModules();
+}
+
+function setWorldBookSheetOpen(open) {
+    if (!ui.worldBookSheet) return;
+    ui.worldBookSheet.classList.toggle('hidden', !open);
+    if (open) renderWorldBookSelector();
+}
+
+function setStickerSheetOpen(open) {
+    if (!ui.stickerSheet) return;
+    ui.stickerSheet.classList.toggle('hidden', !open);
+    if (open) renderStickerPicker();
 }
 
 function getSelectedRoleOption() {
     const selectedId = toTrimmedString(ui.roleSelect?.value);
     if (!selectedId) return null;
     return runtime.roleOptions.find((item) => item.charId === selectedId) || null;
+}
+
+function getSelectedRoleSnapshot() {
+    return getSelectedRoleOption()?.snapshot || {};
+}
+
+function normalizeWorldBookEntries(value) {
+    return (Array.isArray(value) ? value : [])
+        .map((entry, index) => {
+            const source = entry && typeof entry === 'object' ? entry : {};
+            const key = toTrimmedString(source.key || source.name || source.title || `world_${index + 1}`);
+            const valueText = toTrimmedString(source.value || source.content || source.text);
+            if (!key || !valueText) return null;
+            return {
+                key,
+                value: valueText,
+            };
+        })
+        .filter(Boolean);
+}
+
+function getRoleWorldBookEntries() {
+    const snapshot = getSelectedRoleSnapshot();
+    const entries = getWorldBookEntriesFromSnapshot(snapshot);
+    return entries;
+}
+
+function getWorldBookEntriesFromSnapshot(snapshot) {
+    const source = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    const entries = normalizeWorldBookEntries(source.worldBookEntries);
+    if (entries.length > 0) return entries;
+    const text = toTrimmedString(source.worldBookText);
+    if (!text) return [];
+    return text.split(/\n+/g).map((line, index) => {
+        const cleaned = line.replace(/^\s*[-*]\s*/, '').trim();
+        const parts = cleaned.split(/[:：]/);
+        const key = toTrimmedString(parts.shift()) || `world_${index + 1}`;
+        const value = toTrimmedString(parts.join('：')) || cleaned;
+        return key && value ? { key, value } : null;
+    }).filter(Boolean);
+}
+
+function getMountedWorldBookKeys() {
+    const binding = ensureChatMeta()?.binding || createDefaultBinding();
+    const entries = getRoleWorldBookEntries();
+    const allKeys = entries.map((entry) => entry.key);
+    const stored = normalizeStringList(binding.mountedWorldBookKeys);
+    if (entries.length === 0) return [];
+    if (stored.includes(WORLD_BOOK_NONE_SENTINEL)) return [];
+    return stored.length > 0
+        ? stored.filter((key) => allKeys.includes(key))
+        : allKeys;
+}
+
+function getMountedWorldBookText() {
+    const selectedKeys = new Set(getMountedWorldBookKeys());
+    return getRoleWorldBookEntries()
+        .filter((entry) => selectedKeys.has(entry.key))
+        .map((entry) => `- ${entry.key}: ${entry.value}`)
+        .join('\n');
+}
+
+function normalizeStickerList(value) {
+    return (Array.isArray(value) ? value : [])
+        .map((item) => {
+            const source = item && typeof item === 'object' ? item : {};
+            const id = toTrimmedString(source.id || source.stickerId);
+            const aiId = toTrimmedString(source.aiId || source.ai_id || id);
+            const desc = toTrimmedString(source.desc || source.description || source.text || source.name);
+            if (!id || !desc) return null;
+            return {
+                id,
+                aiId,
+                desc,
+                groupName: toTrimmedString(source.groupName || source.group || ''),
+                imageDataUrl: toTrimmedString(source.imageDataUrl || source.image || source.url || ''),
+            };
+        })
+        .filter(Boolean);
+}
+
+function getAvailableStickers() {
+    return normalizeStickerList(getSelectedRoleSnapshot().stickerList).slice(0, 80);
+}
+
+function findStickerByAnyId(id) {
+    const safeId = toTrimmedString(id);
+    if (!safeId) return null;
+    return getAvailableStickers().find((sticker) => sticker.id === safeId || sticker.aiId === safeId) || null;
 }
 
 function applyFloatingLayout() {
@@ -1639,6 +1966,14 @@ async function saveBindingFromSelection(options = {}) {
     }
 
     const snapshot = role.snapshot || {};
+    const previousRoleId = toTrimmedString(meta.binding?.selectedRoleId || meta.binding?.charId);
+    const roleWorldBookKeys = getWorldBookEntriesFromSnapshot(snapshot).map((entry) => entry.key);
+    const previousMountedWorldBookKeys = normalizeStringList(meta.binding?.mountedWorldBookKeys);
+    const mountedWorldBookKeys = previousRoleId === toTrimmedString(role.charId)
+        ? (previousMountedWorldBookKeys.includes(WORLD_BOOK_NONE_SENTINEL)
+            ? [WORLD_BOOK_NONE_SENTINEL]
+            : previousMountedWorldBookKeys.filter((key) => roleWorldBookKeys.includes(key)))
+        : roleWorldBookKeys;
     meta.binding = Object.assign({}, createDefaultBinding(), meta.binding, {
         selectedRoleId: toTrimmedString(role.charId),
         displayName: toTrimmedString(role.displayName || snapshot.displayName || role.charName),
@@ -1653,6 +1988,7 @@ async function saveBindingFromSelection(options = {}) {
         promptProfile: toTrimmedString(snapshot.promptProfile),
         hippocampusEnabled: Boolean(snapshot.hippocampusEnabled),
         snapshotUpdatedAt: toTrimmedString(role.updatedAt || snapshot.updatedAt),
+        mountedWorldBookKeys,
     });
     if (!meta.binding.sessionId) meta.binding.sessionId = createId();
     getContext().chatMetadata[MODULE_NAME] = meta;
@@ -1713,6 +2049,8 @@ function renderBinding() {
     }
     renderComposerState(roleName);
     if (ui.openSyncSheetButton) ui.openSyncSheetButton.disabled = !roleName || runtime.sendInFlight;
+    if (ui.openWorldBooksButton) ui.openWorldBooksButton.disabled = !roleName || getRoleWorldBookEntries().length === 0;
+    if (ui.openStickersButton) ui.openStickersButton.disabled = !roleName || getAvailableStickers().length === 0 || runtime.sendInFlight;
 }
 
 function renderComposerState(roleName = '') {
@@ -1720,9 +2058,11 @@ function renderComposerState(roleName = '') {
     const hasUserTurn = transcript.some((item) => item.role === 'user' && !item.pending);
     const hasAssistantTurn = transcript.some((item) => item.role === 'assistant' && !item.pending && item.text);
     const baseDisabled = !roleName || runtime.sendInFlight;
-    if (ui.sendButton) ui.sendButton.disabled = baseDisabled;
+    const hasDraft = getComposerDraftLines().length > 0;
+    if (ui.sendButton) ui.sendButton.disabled = baseDisabled || !hasDraft;
     if (ui.regenerateButton) ui.regenerateButton.disabled = baseDisabled || !hasUserTurn;
     if (ui.continueButton) ui.continueButton.disabled = baseDisabled || !hasAssistantTurn;
+    renderStagedComposerLines();
 }
 
 async function syncStateFromChat(options = {}) {
@@ -1949,6 +2289,9 @@ function applyModuleSyncMode(module, syncMode) {
 
 function defaultModuleSyncMode(module) {
     if (!module) return 'content';
+    const tagName = toTrimmedString(module.tagName || module.tagKey).toLowerCase();
+    if (tagName && DISCARD_TAGS.some((token) => tagName.includes(token))) return 'ignore';
+    if (/(summary|recap|digest|abstract|outline|摘要|总结)/i.test(tagName)) return 'summary';
     if (module.sourceType === 'status_bar' || module.sourceType === 'html_fragment') return 'fast';
     return 'content';
 }
@@ -2115,6 +2458,8 @@ function renderAll() {
     renderBinding();
     renderContextStats();
     renderLatestModules();
+    if (ui.worldBookSheet && !ui.worldBookSheet.classList.contains('hidden')) renderWorldBookSelector();
+    if (ui.stickerSheet && !ui.stickerSheet.classList.contains('hidden')) renderStickerPicker();
     renderTranscript();
 }
 
@@ -2419,6 +2764,14 @@ function getBindingPayload() {
         promptProfile: toTrimmedString(binding.promptProfile),
         hippocampusEnabled: Boolean(binding.hippocampusEnabled),
         snapshotUpdatedAt: toTrimmedString(binding.snapshotUpdatedAt),
+        worldBookText: getMountedWorldBookText(),
+        mountedWorldBookKeys: getMountedWorldBookKeys(),
+        stickerList: getAvailableStickers().map((sticker) => ({
+            id: sticker.id,
+            aiId: sticker.aiId,
+            desc: sticker.desc,
+            groupName: sticker.groupName,
+        })),
     };
 }
 
@@ -2732,6 +3085,12 @@ function toTrimmedString(value) {
     return String(value == null ? '' : value).trim();
 }
 
+function normalizeStringList(value) {
+    return (Array.isArray(value) ? value : [])
+        .map((item) => toTrimmedString(item))
+        .filter(Boolean);
+}
+
 function clampNumber(value, min, max, fallback) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return fallback;
@@ -2942,7 +3301,26 @@ function renderLatestModules() {
         return;
     }
 
-    ui.modulesRoot.innerHTML = latest.modules.map((module) => {
+    const tagOptions = collectModuleTagOptions(latest.modules);
+    const filter = runtime.moduleTagFilter && tagOptions.some((item) => item.key === runtime.moduleTagFilter)
+        ? runtime.moduleTagFilter
+        : '';
+    runtime.moduleTagFilter = filter;
+    const visibleModules = filter
+        ? latest.modules.filter((module) => buildModulePreferenceKey(module) === filter)
+        : latest.modules;
+    const filterHtml = tagOptions.length > 1
+        ? `<div class="idic-companion__tag-filter">
+            <button type="button" class="idic-companion__tag-filter-btn ${filter ? '' : 'active'}" data-module-tag-filter="">全部</button>
+            ${tagOptions.map((item) => `
+                <button type="button" class="idic-companion__tag-filter-btn ${filter === item.key ? 'active' : ''}" data-module-tag-filter="${escapeHtml(item.key)}">
+                    ${escapeHtml(item.label)} ${item.count}
+                </button>
+            `).join('')}
+        </div>`
+        : '';
+
+    ui.modulesRoot.innerHTML = filterHtml + visibleModules.map((module) => {
         const mode = getModuleSyncMode(module);
         return `
             <div class="idic-companion__module" data-module-id="${escapeHtml(module.id)}">
@@ -2963,10 +3341,20 @@ function renderLatestModules() {
                         >${escapeHtml(getModuleSyncModeLabel(value))}</button>
                     `).join('')}
                 </div>
-                <pre class="idic-companion__module-preview">${escapeHtml(clipText(module.text, SYNC_PREVIEW_TEXT_LIMIT))}</pre>
+                <div class="idic-companion__module-apply-row">
+                    <button type="button" class="idic-companion__mini-btn" data-apply-module-tag="${escapeHtml(module.id)}" data-mode="${escapeHtml(mode)}">同标签应用</button>
+                </div>
+                <pre class="idic-companion__module-preview">${escapeHtml(module.text)}</pre>
             </div>
         `;
     }).join('');
+
+    ui.modulesRoot.querySelectorAll('[data-module-tag-filter]').forEach((element) => {
+        element.addEventListener('click', () => {
+            runtime.moduleTagFilter = toTrimmedString(element.getAttribute('data-module-tag-filter'));
+            renderLatestModules();
+        });
+    });
 
     ui.modulesRoot.querySelectorAll('[data-module-mode]').forEach((element) => {
         element.addEventListener('click', async (event) => {
@@ -2993,6 +3381,101 @@ function renderLatestModules() {
             scheduleBackgroundMaintenance();
         });
     });
+
+    ui.modulesRoot.querySelectorAll('[data-apply-module-tag]').forEach((element) => {
+        element.addEventListener('click', async (event) => {
+            const target = event.currentTarget;
+            if (!(target instanceof HTMLButtonElement)) return;
+            const moduleId = target.getAttribute('data-apply-module-tag');
+            const mode = target.getAttribute('data-mode');
+            if (!moduleId || !MODULE_SYNC_MODES.includes(String(mode))) return;
+            const turn = runtime.chatState?.turns?.[runtime.latestTurnId];
+            const sourceModule = turn?.modules?.find((module) => module.id === moduleId);
+            if (!turn || !sourceModule) return;
+            const preferenceKey = buildModulePreferenceKey(sourceModule);
+            const previousTurn = normalizeTurnEntry(turn, turn.turnId);
+            turn.modules = turn.modules.map((module) => {
+                if (buildModulePreferenceKey(module) !== preferenceKey) return module;
+                const updated = applyModuleSyncMode(module, String(mode));
+                rememberModuleSyncPreference(updated, String(mode));
+                return updated;
+            });
+            turn.summarySourceDigest = computePersistentDigest(turn.userText, turn.modules);
+            refreshTurnSummaryState(turn, previousTurn);
+            runtime.chatState.stageSummaries = [];
+            await persistChatState();
+            renderContextStats();
+            renderLatestModules();
+            scheduleBackgroundMaintenance();
+        });
+    });
+}
+
+function collectModuleTagOptions(modules) {
+    const map = new Map();
+    (Array.isArray(modules) ? modules : []).forEach((module) => {
+        const key = buildModulePreferenceKey(module);
+        if (!key) return;
+        const label = getModuleSourceTag(module);
+        const current = map.get(key) || { key, label, count: 0 };
+        current.count += 1;
+        map.set(key, current);
+    });
+    return Array.from(map.values());
+}
+
+function renderWorldBookSelector() {
+    if (!ui.worldBooksRoot) return;
+    const entries = getRoleWorldBookEntries();
+    if (entries.length === 0) {
+        ui.worldBooksRoot.innerHTML = '<div class="idic-companion__empty">这个角色没有世界书</div>';
+        return;
+    }
+    const selectedKeys = new Set(getMountedWorldBookKeys());
+    ui.worldBooksRoot.innerHTML = entries.map((entry) => `
+        <label class="idic-companion__worldbook-row">
+            <input type="checkbox" data-worldbook-key="${escapeHtml(entry.key)}" ${selectedKeys.has(entry.key) ? 'checked' : ''} />
+            <span>
+                <div class="idic-companion__worldbook-name">${escapeHtml(entry.key)}</div>
+                <div class="idic-companion__worldbook-preview">${escapeHtml(clipText(entry.value, 220))}</div>
+            </span>
+        </label>
+    `).join('');
+    ui.worldBooksRoot.querySelectorAll('[data-worldbook-key]').forEach((input) => {
+        input.addEventListener('change', async () => {
+            const meta = ensureChatMeta();
+            if (!meta) return;
+            const checked = Array.from(ui.worldBooksRoot.querySelectorAll('[data-worldbook-key]:checked'))
+                .map((node) => toTrimmedString(node.getAttribute('data-worldbook-key')))
+                .filter(Boolean);
+            meta.binding.mountedWorldBookKeys = checked.length > 0 ? checked : [WORLD_BOOK_NONE_SENTINEL];
+            await saveChatMeta();
+            renderBinding();
+        });
+    });
+}
+
+function renderStickerPicker() {
+    if (!ui.stickersRoot) return;
+    const stickers = getAvailableStickers();
+    if (stickers.length === 0) {
+        ui.stickersRoot.innerHTML = '<div class="idic-companion__empty">这个角色没有表情包</div>';
+        return;
+    }
+    ui.stickersRoot.innerHTML = stickers.map((sticker) => `
+        <button type="button" class="idic-companion__sticker-btn" data-sticker-id="${escapeHtml(sticker.id)}">
+            ${sticker.imageDataUrl
+                ? `<img src="${escapeHtml(sticker.imageDataUrl)}" alt="${escapeHtml(sticker.desc)}" />`
+                : '<span class="idic-companion__sticker-fallback">☺</span>'}
+            <span>${escapeHtml(clipText(sticker.desc, 28))}</span>
+        </button>
+    `).join('');
+    ui.stickersRoot.querySelectorAll('[data-sticker-id]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const sticker = findStickerByAnyId(button.getAttribute('data-sticker-id'));
+            if (sticker) void sendUserSticker(sticker);
+        });
+    });
 }
 
 function splitUserMessageLines(text) {
@@ -3001,6 +3484,72 @@ function splitUserMessageLines(text) {
         .split(/\n+/g)
         .map((line) => line.trim())
         .filter(Boolean);
+}
+
+function normalizeStagedUserLines() {
+    runtime.stagedUserLines = Array.isArray(runtime.stagedUserLines)
+        ? runtime.stagedUserLines.map((line) => toTrimmedString(line)).filter(Boolean)
+        : [];
+    return runtime.stagedUserLines;
+}
+
+function getCurrentComposerLines() {
+    return splitUserMessageLines(ui.input?.value);
+}
+
+function getComposerDraftLines() {
+    return normalizeStagedUserLines().concat(getCurrentComposerLines());
+}
+
+function renderStagedComposerLines() {
+    if (!ui.stagedLinesRoot) return;
+    const lines = normalizeStagedUserLines();
+    ui.stagedLinesRoot.classList.toggle('hidden', lines.length === 0);
+    if (lines.length === 0) {
+        ui.stagedLinesRoot.innerHTML = '';
+        return;
+    }
+    ui.stagedLinesRoot.innerHTML = lines.map((line, index) => `
+        <div class="idic-companion__staged-line">
+            <span class="idic-companion__staged-text">${escapeHtml(line)}</span>
+            <button type="button" class="idic-companion__staged-remove" data-staged-line-index="${index}" aria-label="删除这条">删</button>
+        </div>
+    `).join('');
+    ui.stagedLinesRoot.querySelectorAll('[data-staged-line-index]').forEach((button) => {
+        button.addEventListener('click', () => {
+            removeStagedComposerLine(Number(button.getAttribute('data-staged-line-index')));
+        });
+    });
+}
+
+function stageCurrentComposerInput() {
+    const lines = getCurrentComposerLines();
+    if (lines.length === 0) return;
+    runtime.stagedUserLines = normalizeStagedUserLines().concat(lines);
+    if (ui.input) {
+        ui.input.value = '';
+        if (!ui.input.disabled) ui.input.focus();
+    }
+    renderComposerState(getActiveRoleName());
+}
+
+function removeStagedComposerLine(index) {
+    const lines = normalizeStagedUserLines();
+    if (!Number.isInteger(index) || index < 0 || index >= lines.length) return;
+    lines.splice(index, 1);
+    runtime.stagedUserLines = lines;
+    renderComposerState(getActiveRoleName());
+}
+
+function clearComposerDraft(options = {}) {
+    runtime.stagedUserLines = [];
+    if (ui.input) {
+        ui.input.value = '';
+        if (options.keepFocus !== false && !ui.input.disabled) ui.input.focus();
+    }
+    if (options.render !== false) {
+        renderComposerState(getActiveRoleName());
+    }
 }
 
 function splitAssistantSentenceLine(line) {
@@ -3029,6 +3578,64 @@ function normalizeAssistantReplyLines(text) {
         }
     });
     return result.length ? result : [raw];
+}
+
+function buildAssistantReplyEntries(replyText, batchId) {
+    const now = Date.now();
+    const entries = [];
+    const raw = toTrimmedString(replyText) || '没有收到回复';
+    raw.split(/\n+/g).forEach((line) => {
+        const cleaned = toTrimmedString(line);
+        if (!cleaned) return;
+        const stickerMatch = cleaned.match(/^\[STICKER:([^\]]+)\]$/i);
+        if (stickerMatch) {
+            const sticker = findStickerByAnyId(stickerMatch[1]);
+            const desc = sticker?.desc || `表情 ${stickerMatch[1]}`;
+            entries.push({
+                id: createId(),
+                role: 'assistant',
+                text: `[表情] ${desc}`,
+                createdAt: now + entries.length,
+                batchId,
+                sourceType: 'companion',
+                messageType: STICKER_TRANSCRIPT_TYPE,
+                stickerId: sticker?.id || '',
+                stickerAiId: sticker?.aiId || toTrimmedString(stickerMatch[1]),
+                stickerDesc: desc,
+                stickerImage: sticker?.imageDataUrl || '',
+            });
+            return;
+        }
+        normalizeAssistantReplyLines(cleaned).forEach((text) => {
+            entries.push({
+                id: createId(),
+                role: 'assistant',
+                text,
+                createdAt: now + entries.length,
+                batchId,
+                sourceType: 'companion',
+            });
+        });
+    });
+    return entries.length ? entries : [{
+        id: createId(),
+        role: 'assistant',
+        text: '没有收到回复',
+        createdAt: now,
+        batchId,
+        sourceType: 'companion',
+    }];
+}
+
+function formatReplyStatus(response) {
+    const memoryCount = Number(response?.memoryCount || 0);
+    const memoryStatus = toTrimmedString(response?.memoryStatus || '');
+    const memoryError = toTrimmedString(response?.memoryError || '');
+    if (memoryStatus === 'disabled') return '已回复，海马体未启用';
+    if (memoryStatus === 'missing') return '已回复，海马体未部署';
+    if (memoryStatus === 'write_failed') return `已回复，海马体写入失败：${memoryError || '请检查 SQL'}`;
+    if (memoryStatus === 'ok') return `已回复，海马体已连接，命中 ${memoryCount} 条记忆`;
+    return `已回复，命中 ${memoryCount} 条海马体记忆`;
 }
 
 function getTranscriptBatchId(item) {
@@ -3113,6 +3720,9 @@ function updateTranscriptSelectionBar() {
     const active = Boolean(runtime.transcriptSelectionMode && selectedCount > 0);
     ui.selectBar.classList.toggle('hidden', !active);
     ui.selectCount.textContent = `已选 ${selectedCount} 条`;
+    if (ui.selectEditButton) {
+        ui.selectEditButton.disabled = selectedCount !== 1;
+    }
     if (ui.selectDeleteButton) {
         ui.selectDeleteButton.disabled = selectedCount === 0;
     }
@@ -3167,6 +3777,27 @@ async function deleteSelectedTranscriptEntries() {
     renderTranscript();
 }
 
+async function editSelectedTranscriptEntry() {
+    if (!(runtime.selectedTranscriptIds instanceof Set) || runtime.selectedTranscriptIds.size !== 1) return;
+    const selectedId = Array.from(runtime.selectedTranscriptIds)[0];
+    const item = runtime.chatState?.transcript?.find((entry) => String(entry?.id || '') === selectedId);
+    if (!item || item.pending) return;
+    const nextText = window.prompt('编辑这条消息', item.text);
+    if (nextText == null) return;
+    const text = toTrimmedString(nextText);
+    if (!text) return;
+    item.text = clipText(text, STORED_TURN_TEXT_LIMIT);
+    if (item.messageType === STICKER_TRANSCRIPT_TYPE) {
+        item.stickerDesc = item.text.replace(/^\[表情\]\s*/, '').trim() || item.stickerDesc;
+    }
+    runtime.transcriptSelectionMode = false;
+    runtime.selectedTranscriptIds = new Set();
+    trimTranscript();
+    await persistChatState();
+    scheduleCompanionRecentChatsSync();
+    renderTranscript();
+}
+
 function loadMoreTranscriptMessages() {
     runtime.transcriptRenderCount += TRANSCRIPT_RENDER_PAGE_SIZE;
     renderTranscript();
@@ -3182,6 +3813,7 @@ function bindTranscriptBubbleEvents() {
         if (!transcriptId) return;
         let longPressTimer = null;
         let longPressTriggered = false;
+        let lastTapAt = 0;
         const clearLongPress = () => {
             if (longPressTimer) {
                 clearTimeout(longPressTimer);
@@ -3193,8 +3825,20 @@ function bindTranscriptBubbleEvents() {
                 longPressTriggered = false;
                 return;
             }
-            if (!runtime.transcriptSelectionMode) return;
-            toggleTranscriptSelection(transcriptId);
+            const now = Date.now();
+            if (!runtime.transcriptSelectionMode && now - lastTapAt < 320) {
+                lastTapAt = 0;
+                enterTranscriptSelectionMode(transcriptId);
+                return;
+            }
+            lastTapAt = now;
+            if (runtime.transcriptSelectionMode) {
+                toggleTranscriptSelection(transcriptId);
+            }
+        });
+        element.addEventListener('dblclick', (event) => {
+            event.preventDefault();
+            if (!runtime.transcriptSelectionMode) enterTranscriptSelectionMode(transcriptId);
         });
         element.addEventListener('pointerdown', () => {
             if (runtime.transcriptSelectionMode) return;
@@ -3244,10 +3888,14 @@ function renderTranscript() {
         const speaker = role === 'user' ? '你' : (role === 'assistant' ? assistantName : '系统');
         const selectable = isTranscriptEntrySelectable(item);
         const selected = selectable && runtime.selectedTranscriptIds instanceof Set && runtime.selectedTranscriptIds.has(String(item.id));
+        const showCheck = selectable && runtime.transcriptSelectionMode;
+        const stickerHtml = item.messageType === STICKER_TRANSCRIPT_TYPE
+            ? renderStickerBubbleContent(item)
+            : escapeHtml(item.text);
         html.push(`
             <div class="idic-companion__bubble ${cls} ${selectable ? 'selectable' : ''} ${selected ? 'selected' : ''}" ${selectable ? `data-transcript-id="${escapeHtml(item.id)}"` : ''}>
-                ${selectable ? `<span class="idic-companion__bubble-check">${selected ? '✓' : ''}</span>` : ''}
-                <div class="idic-companion__bubble-box">${escapeHtml(item.text)}</div>
+                ${showCheck ? `<span class="idic-companion__bubble-check">${selected ? '✓' : ''}</span>` : ''}
+                <div class="idic-companion__bubble-box">${stickerHtml}</div>
                 <div class="idic-companion__bubble-meta">${escapeHtml(speaker)} · ${escapeHtml(timestamp)}${item.pending ? ' · 发送中' : ''}</div>
             </div>
         `);
@@ -3258,6 +3906,19 @@ function renderTranscript() {
     if (ui.scrollRoot && !runtime.transcriptSelectionMode) {
         ui.scrollRoot.scrollTop = ui.scrollRoot.scrollHeight;
     }
+}
+
+function renderStickerBubbleContent(item) {
+    const image = toTrimmedString(item.stickerImage);
+    const desc = toTrimmedString(item.stickerDesc || item.text.replace(/^\[表情\]\s*/, '')) || '表情包';
+    return `
+        <div class="idic-companion__bubble-sticker">
+            ${image
+                ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(desc)}" />`
+                : '<span class="idic-companion__sticker-fallback">☺</span>'}
+            <span class="idic-companion__bubble-sticker-label">${escapeHtml(desc)}</span>
+        </div>
+    `;
 }
 
 function buildTranscriptPayload() {
@@ -3300,6 +3961,9 @@ function buildCompanionRecentChatsPayload() {
             content: item.text,
             time: new Date(item.createdAt || Date.now()).toISOString(),
             batchId: getTranscriptBatchId(item),
+            messageType: item.messageType || 'text',
+            stickerId: item.stickerId || '',
+            stickerDesc: item.stickerDesc || '',
             source: 'sillytavern_companion',
             sourceLabel: '酒馆陪读',
         }));
@@ -3336,7 +4000,7 @@ async function syncCompanionRecentChatsToSnapshot() {
 
 async function sendCompanionMessage() {
     if (runtime.sendInFlight) return;
-    const lines = splitUserMessageLines(ui.input?.value);
+    const lines = getComposerDraftLines();
     if (lines.length === 0) return;
 
     await saveBindingFromSelection({ silent: true });
@@ -3380,8 +4044,8 @@ async function sendCompanionMessage() {
     trimTranscript();
     await persistChatState();
     scheduleCompanionRecentChatsSync();
+    clearComposerDraft({ keepFocus: false, render: false });
     renderTranscript();
-    if (ui.input) ui.input.value = '';
     setStatus('对方正在输入...', 'info');
 
     try {
@@ -3398,19 +4062,100 @@ async function sendCompanionMessage() {
             },
         });
 
-        const replyLines = normalizeAssistantReplyLines(toTrimmedString(response.reply) || '没有收到回复');
-        replaceTranscriptBatch(pendingBatchId, replyLines.map((text, index) => ({
+        replaceTranscriptBatch(pendingBatchId, buildAssistantReplyEntries(response.reply, pendingBatchId));
+        await persistChatState();
+        await syncCompanionRecentChatsToSnapshot();
+        renderTranscript();
+        setStatus(formatReplyStatus(response), 'success');
+    } catch (error) {
+        const message = formatErrorMessage(error);
+        replaceTranscriptBatch(pendingBatchId, [{
             id: createId(),
-            role: 'assistant',
-            text,
-            createdAt: Date.now() + index,
+            role: 'system',
+            text: `连接失败：${message}`,
+            createdAt: Date.now(),
             batchId: pendingBatchId,
-            sourceType: 'companion',
-        })));
+            sourceType: 'system',
+        }]);
         await persistChatState();
         scheduleCompanionRecentChatsSync();
         renderTranscript();
-        setStatus(`已回复，命中 ${Number(response.memoryCount || 0)} 条海马体记忆`, 'success');
+        setStatus(`连接失败：${message}`, 'error');
+    } finally {
+        runtime.sendInFlight = false;
+        renderBinding();
+    }
+}
+
+async function sendUserSticker(sticker) {
+    if (runtime.sendInFlight) return;
+    const safeSticker = sticker && typeof sticker === 'object' ? sticker : null;
+    if (!safeSticker) return;
+    await saveBindingFromSelection({ silent: true });
+    const binding = getBindingPayload();
+    if (!binding.charId || !binding.charName || (!binding.charPersona && !binding.promptProfile)) {
+        notify('请先选择角色', 'warning');
+        return;
+    }
+
+    const desc = toTrimmedString(safeSticker.desc) || '表情包';
+    runtime.sendInFlight = true;
+    setStickerSheetOpen(false);
+    await syncStateFromChat({
+        captureLatestStatus: false,
+        forceLatestRescan: false,
+        maxRecentTurns: 1,
+        lightweight: true,
+    });
+    await scheduleImmediateContextHydration();
+
+    const userBatchId = createId();
+    const pendingBatchId = createId();
+    appendTranscriptEntries([{
+        id: createId(),
+        role: 'user',
+        text: `[表情] ${desc}`,
+        createdAt: Date.now(),
+        batchId: userBatchId,
+        sourceType: 'companion',
+        messageType: STICKER_TRANSCRIPT_TYPE,
+        stickerId: safeSticker.id,
+        stickerAiId: safeSticker.aiId,
+        stickerDesc: desc,
+        stickerImage: safeSticker.imageDataUrl,
+    }, {
+        id: createId(),
+        role: 'assistant',
+        text: '...',
+        createdAt: Date.now() + 1,
+        pending: true,
+        batchId: pendingBatchId,
+        sourceType: 'companion',
+    }], { persist: false, sync: false });
+    trimTranscript();
+    await persistChatState();
+    scheduleCompanionRecentChatsSync();
+    renderTranscript();
+    setStatus('对方正在输入...', 'info');
+
+    try {
+        const response = await callBridge('reply', {
+            binding,
+            apiConfig: getApiConfigPayload(),
+            readingContext: buildReadingContextPayload(),
+            transcript: buildTranscriptPayload(),
+            userMessage: `[表情] ${desc}`,
+            userMessages: [`[表情] ${desc}`],
+            stChatLabel: getCurrentChatLabel(),
+            replyControl: {
+                replyMode: 'normal',
+            },
+        });
+        replaceTranscriptBatch(pendingBatchId, buildAssistantReplyEntries(response.reply, pendingBatchId));
+        await persistChatState();
+        await syncCompanionRecentChatsToSnapshot();
+        renderTranscript();
+        setStatus(formatReplyStatus(response), 'success');
     } catch (error) {
         const message = formatErrorMessage(error);
         replaceTranscriptBatch(pendingBatchId, [{
@@ -3527,19 +4272,11 @@ async function sendBridgeReply(options) {
             },
         });
 
-        const replyLines = normalizeAssistantReplyLines(toTrimmedString(response.reply) || '没有收到回复');
-        replaceTranscriptBatch(pendingBatchId, replyLines.map((text, index) => ({
-            id: createId(),
-            role: 'assistant',
-            text,
-            createdAt: Date.now() + index,
-            batchId: pendingBatchId,
-            sourceType: 'companion',
-        })));
+        replaceTranscriptBatch(pendingBatchId, buildAssistantReplyEntries(response.reply, pendingBatchId));
         await persistChatState();
-        scheduleCompanionRecentChatsSync();
+        await syncCompanionRecentChatsToSnapshot();
         renderTranscript();
-        setStatus(`已回复，命中 ${Number(response.memoryCount || 0)} 条海马体记忆`, 'success');
+        setStatus(formatReplyStatus(response), 'success');
     } catch (error) {
         const message = formatErrorMessage(error);
         replaceTranscriptBatch(pendingBatchId, [{

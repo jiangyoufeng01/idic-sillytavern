@@ -181,7 +181,7 @@ async function handleReply(body: Obj) {
 
     const reply = await callChatCompletions(messages, apiConfig, apiConfig.temperature, 2600);
 
-    await writeCompanionMemory({
+    const memoryWrite = await writeCompanionMemory({
         binding,
         readingContext,
         userMessage: latestUserBlock,
@@ -193,6 +193,8 @@ async function handleReply(body: Obj) {
         ok: true,
         reply,
         memoryCount: recalled.length,
+        memoryStatus: !binding.hippocampusEnabled ? "disabled" : memoryWrite.status,
+        memoryError: memoryWrite.error || "",
         recalledMemories: recalled.map((item) => ({
             id: item.id,
             preview: clip(item.content, 120),
@@ -351,6 +353,9 @@ function normalizeBinding(value: unknown) {
         promptProfile: trim(source.promptProfile),
         hippocampusEnabled: toBoolean(source.hippocampusEnabled),
         snapshotUpdatedAt: trim(source.snapshotUpdatedAt || source.updatedAt),
+        worldBookText: trim(source.worldBookText),
+        mountedWorldBookKeys: normalizeStringArray(source.mountedWorldBookKeys),
+        stickerList: normalizeStickerList(source.stickerList),
     };
 }
 
@@ -429,6 +434,19 @@ function normalizeCompanionUserMessages(value: unknown, fallback = "") {
     return safeFallback ? [safeFallback] : [];
 }
 
+function normalizeStringArray(value: unknown) {
+    return (Array.isArray(value) ? value : []).map((item) => trim(item)).filter(Boolean);
+}
+
+function normalizeStickerList(value: unknown) {
+    return arrayOfObjects(value).map((item) => ({
+        id: trim(item.id || item.stickerId),
+        aiId: trim(item.aiId || item.ai_id || item.id || item.stickerId),
+        desc: trim(item.desc || item.description || item.text || item.name),
+        groupName: trim(item.groupName || item.group_name || item.group),
+    })).filter((item) => item.id && item.aiId && item.desc).slice(0, 80);
+}
+
 function normalizeCompanionRecentChats(value: unknown) {
     return arrayOfObjects(value).map((item) => ({
         id: trim(item.id) || crypto.randomUUID(),
@@ -436,6 +454,9 @@ function normalizeCompanionRecentChats(value: unknown) {
         content: trim(item.content || item.text || item.message),
         time: trim(item.time || item.createdAt || item.created_at || new Date().toISOString()),
         batchId: trim(item.batchId || item.batch_id),
+        messageType: trim(item.messageType || item.message_type || item.type),
+        stickerId: trim(item.stickerId || item.sticker_id),
+        stickerDesc: trim(item.stickerDesc || item.sticker_desc),
         source: trim(item.source || "sillytavern_companion"),
         sourceLabel: trim(item.sourceLabel || item.source_label || "酒馆陪读"),
     })).filter((item) => item.content).slice(-50);
@@ -496,6 +517,16 @@ function buildReplyMessages(input: {
     const promptProfileBlock = binding.promptProfile
         ? `【IDIC 主聊天继承资料】\n${binding.promptProfile}`
         : "";
+    const worldBookBlock = binding.worldBookText
+        ? `【本次陪读挂载世界书】\n${binding.worldBookText}`
+        : "";
+    const stickerBlock = binding.stickerList.length > 0
+        ? [
+            "【可用表情包】",
+            "如果情绪合适，可以把表情包作为独立一行发送，格式必须是 [STICKER:表情包ID]，不要解释这个指令。",
+            ...binding.stickerList.map((item) => `- [STICKER:${item.aiId}] ${item.desc}`)
+        ].join("\n")
+        : "";
 
     const systemPrompt = [
         `你是 ${displayName}。`,
@@ -506,6 +537,8 @@ function buildReplyMessages(input: {
         binding.userPersona ? `用户人设：${binding.userPersona}` : "",
         binding.systemPrompt ? `额外系统提示：${binding.systemPrompt}` : "",
         promptProfileBlock,
+        worldBookBlock,
+        stickerBlock,
         "补充输出要求：像主聊天一样一行一句，不要编号，不要项目符号，默认回 4 到 8 句，除非用户明确要求简短，不要只回一两句，也不要说到一半突然收住。",
         "重要规则：",
         "1. 把 SillyTavern 阅读材料当成用户拿给你看的外部剧情，不要把它当成你自己的真实人生。",
@@ -740,7 +773,8 @@ async function writeCompanionMemory(input: {
     control: ReturnType<typeof normalizeReplyControl>;
 }) {
     const { binding, readingContext, userMessage, assistantReply, control } = input;
-    if (!binding.hippocampusEnabled || !binding.userId || !binding.charId || !assistantReply) return;
+    if (!binding.hippocampusEnabled) return { status: "disabled", error: "" };
+    if (!binding.userId || !binding.charId || !assistantReply) return { status: "skipped", error: "" };
 
     const memoryContent = [
         `[SillyTavern陪读侧窗 | ${new Date().toISOString()}]`,
@@ -785,10 +819,11 @@ async function writeCompanionMemory(input: {
             throw error;
         }
     } catch (error) {
-        if (!isMissingBridgeCapability(error)) {
-            console.warn("[idic-companion-bridge] hippocampus memory write skipped", formatError(error));
+        if (isMissingBridgeCapability(error)) {
+            return { status: "missing", error: formatError(error) };
         }
-        return;
+        console.warn("[idic-companion-bridge] hippocampus memory write skipped", formatError(error));
+        return { status: "write_failed", error: formatError(error) };
     }
 
     try {
@@ -801,6 +836,7 @@ async function writeCompanionMemory(input: {
             console.warn("[idic-companion-bridge] promote_buffer_memories failed", error);
         }
     }
+    return { status: "ok", error: "" };
 }
 
 function buildReadingContextRef(readingContext: ReadingContext) {
